@@ -74,28 +74,12 @@ saveRDS(scales, "data/clim_scales.rds")
 clim <- c(clim1, clim2) %>%
       setNames(c(paste0(names(clim1), 1),
                  paste0(names(clim2), 2)))
-writeRaster(clim, "data/clim.tif", overwrite = TRUE)
 
-
-
-# # bb <- ext(-125, -66, 24, 50)
-#
-# scale_rast <- function(x) (x - mean(values(x), na.rm = T)) / sd(values(x), na.rm = T)
-#
-#
-# t1 <- rast("/Volumes/T7/CHELSA/v2/raw/CHELSA_bio1_1981-2010_V.2.1.tif") %>% crop(bb)
-# t2 <- list.files("/Volumes/T7/CHELSA/v2/cmip/", full.names = T)
-# t2 <- t2[grepl("2071", t2) & grepl("ssp370_tas_", t2)] %>% rast() %>% crop(bb) %>% mean()
-# t <- c(t1, t2) %>% scale_rast()
-#
-# p1 <- rast("/Volumes/T7/CHELSA/v2/raw/CHELSA_bio12_1981-2010_V.2.1.tif") %>% crop(bb)
-# p2 <- list.files("/Volumes/T7/CHELSA/v2/cmip/", full.names = T)
-# p2 <- p2[grepl("2071", p2) & grepl("ssp370_pr_", p2)] %>% rast() %>% crop(bb) %>% mean() %>% "*"(12)
-# p <- c(p1, p2) %>% log() %>% scale_rast()
-#
-# clim1 <- c(t[[1]], p[[1]])
-# clim2 <- c(t[[2]], p[[2]])
-#
-# clim <- c(clim1, clim2) %>% setNames(c("t1", "p1", "t2", "p2"))
-#
-# writeRaster(clim, "data/clim.tif", overwrite = TRUE)
+writeRaster(
+      clim,
+      "data/clim_quantized.tif",
+      datatype = "INT2S",
+      scale = 0.01,
+      gdal = c("COMPRESS=DEFLATE", "PREDICTOR=2"),
+      overwrite = TRUE
+)

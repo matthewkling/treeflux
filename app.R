@@ -81,6 +81,11 @@ clim_vars <- function() c("tmean", "ppt", "aet", "cwd")
 #       if(!file.exists("data/fia.csv")) download.file("", "data/fia.csv")
 # }
 
+# input <- list(v1 = "cwd", v2 = "aet", type = "forward (outbound)",
+#               max_clim = .5, max_geog = 250, max_k = 50,
+#               plot_weight = "uniform", mode = "Nearest geographic neighbors",
+#               map_click = list(lat = 45, lng = -116))
+
 
 
 # UI ---------------------------------------------------
@@ -101,41 +106,33 @@ ui <- fluidPage(
                    # selectInput("type", "Analog type",
                    #             c("forward (outbound)", "reverse (inbound)", "baseline")),
                    selectInput("mode", "Query type",
-                               c("Nearest geographic neighbors", "Best climate matches", "Pareto front"))),
-
-            column(width = 2,
+                               c("Nearest geographic neighbors", "Best climate matches", "Pareto front")),
                    selectInput("v1", "Climate variable", clim_vars(), "cwd"),
-                   selectInput("v2", "Second climate variable", clim_vars(), "aet")),
+                   selectInput("v2", "Second climate variable", clim_vars(), "aet"),
+                   sliderInput("max_clim", "Max climate difference (sigma)", .1, 2, value = .5),
+                   sliderInput("max_geog", "Max distance (km)", 50, 1000, value = 300),
+                   sliderInput("max_k", "Max analog matches", 1, 100, value = 50),
+                   selectInput("plot_weight", "Weight",
+                               c("inverse geographic distance", "inverse climate distance", "uniform"))
+            ),
 
-            column(width = 2, sliderInput("max_clim", "Max climate difference (sigma)", .1, 2, value = .5)),
-            column(width = 2, sliderInput("max_geog", "Max distance (km)", 50, 1000, value = 300)),
-            column(width = 2, sliderInput("max_k", "Max analog matches", 1, 100, value = 50)),
-
-            column(width = 2, selectInput("plot_weight", "Weight",
-                                          c("inverse geographic distance", "inverse climate distance", "uniform")))
-
-      ),
-
-      fluidRow(
             column(
-                  width = 4,
+                  width = 5,
+
                   h4("Geography (click map to select focal site)"),
-                  leafletOutput("map", height = "600px")
-            ),
-            column(
-                  width = 3,
-                  h4("Climate"),
-                  plotOutput("analog_plot", height = "600px")
-            ),
-            column(
-                  width = 3,
-                  h4("Analog similarity"),
-                  plotOutput("dist_plot", height = "600px")
-            ),
-            column(
-                  width = 2,
+                  leafletOutput("map", height = "500px"),
+
                   h4("Forest composition"),
-                  plotOutput("forest_plot", height = "600px")
+                  plotOutput("forest_plot", height = "500px")
+            ),
+
+            column(
+                  width = 5,
+                  h4("Climate"),
+                  plotOutput("analog_plot", height = "500px"),
+
+                  h4("Analog similarity"),
+                  plotOutput("dist_plot", height = "500px")
             )
       )
 )
@@ -171,7 +168,7 @@ server <- function(input, output, session) {
       ## Load data -----------------------------------------
       observe({
             # set_up_data()
-            data$climate_raster <- rast("data/clim.tif")
+            data$climate_raster <- rast("data/clim_quantized.tif")
             data$clim_scales <- readRDS("data/clim_scales.rds")
             data$fia_points <- read_csv("data/fia.csv", show_col_types = FALSE)
       })
@@ -324,8 +321,7 @@ server <- function(input, output, session) {
             req(data$focal_site)
             set.seed(123)
             cand <- data$fia_points %>%
-                  # select(x, y, t1, p1, t2, p2) %>%
-                  select(x, y, tmean1:cwd2) %>%
+                  select(x, y, contains("1"), contains("2")) %>%
                   distinct() %>%
                   mutate(geog_dist = geosphere::distHaversine(
                         cbind(x, y),
@@ -554,9 +550,8 @@ server <- function(input, output, session) {
                                "uniform" = 1)
 
             a <- a %>%
-                  mutate(species = paste(genus, species)) %>%
                   group_by(type, species) %>%
-                  summarize(basal_area = weighted.mean(pi*(dia/2)^2, weight) / 1550) %>% # sq in to sq m
+                  summarize(basal_area = weighted.mean(basal_area, weight)) %>%
                   group_by(type) %>%
                   mutate(total = sum(basal_area)) %>%
                   arrange(desc(total))

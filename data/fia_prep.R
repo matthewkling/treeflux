@@ -104,7 +104,7 @@ d <- d %>%
 # merge with climate ----------------------------------
 
 # load climate data
-climate <- rast("data/clim.tif")
+climate <- rast("data/clim_quantized.tif")
 
 # filter to climate data bbox
 bb <- ext(climate)
@@ -132,4 +132,12 @@ dc <- cbind(dc, terra::extract(climate, dc[,1:2]))
 
 # export -------------------------------------------
 
-write_csv(dc, "data/fia.csv")
+# round to reduce size on disk
+dc_small <- dc %>%
+      select(-ID) %>%
+      mutate(across(
+            where(is.double),
+            ~ round(.x, 3)
+      ))
+
+write_csv(dc_small, "data/fia.csv")
