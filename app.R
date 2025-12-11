@@ -75,16 +75,12 @@ clim_circle <- function(pt, radius, means, sds) {
 
 clim_vars <- function() c("tmean", "ppt", "aet", "cwd")
 
-# set_up_data <- function(){
-#       if(!dir.exists("data")) dir.create("data")
-#       if(!file.exists("data/clim.tif")) download.file("", "data/clim.tif")
-#       if(!file.exists("data/fia.csv")) download.file("", "data/fia.csv")
-# }
 
 # input <- list(v1 = "cwd", v2 = "aet", type = "forward (outbound)",
 #               max_clim = .5, max_geog = 250, max_k = 50,
 #               plot_weight = "uniform", mode = "Nearest geographic neighbors",
-#               map_click = list(lat = 45, lng = -116))
+#               map_click = list(lat = 45, lng = -116),
+#               species = "Populus tremuloides")
 
 
 
@@ -113,7 +109,10 @@ ui <- fluidPage(
                    sliderInput("max_geog", "Max distance (km)", 50, 1000, value = 300),
                    sliderInput("max_k", "Max analog matches", 1, 100, value = 50),
                    selectInput("plot_weight", "Weight",
-                               c("inverse geographic distance", "inverse climate distance", "uniform"))
+                               c("inverse geographic distance", "inverse climate distance", "uniform")),
+                   selectizeInput("species", "Focal species",
+                               choices = sort(unique(read_csv("data/fia.csv", show_col_types = FALSE)$species)),
+                               selected = "Pinus contorta")
             ),
 
             column(
@@ -170,29 +169,37 @@ server <- function(input, output, session) {
             # set_up_data()
             data$climate_raster <- rast("data/clim_quantized.tif")
             data$clim_scales <- readRDS("data/clim_scales.rds")
-            data$fia_points <- read_csv("data/fia.csv", show_col_types = FALSE)
+
+            data$fia_plots <- read_csv("data/fia.csv", show_col_types = FALSE) %>%
+                  select(x, y, aet1:tmean2) %>%
+                  distinct() %>%
+                  mutate(index = 1:nrow(.))
+
+            data$fia_plots_species <- read_csv("data/fia.csv", show_col_types = FALSE) %>%
+                  left_join(select(data$fia_plots, x, y, index),
+                            by = join_by(x, y))
       })
 
 
       ## Base map -----------------------------------------------
       output$map <- renderLeaflet({
-            req(data$fia_points)
+            req(data$fia_plots)
 
             leaflet(options = leafletOptions(preferCanvas = TRUE)) %>%
                   addProviderTiles(providers$OpenTopoMap,
                                    options = providerTileOptions(className = "grayscale")) %>%
 
                   # zoom to FIA extent
-                  fitBounds(lng1 = min(data$fia_points$x),
-                            lat1 = min(data$fia_points$y),
-                            lng2 = max(data$fia_points$x),
-                            lat2 = max(data$fia_points$y))
+                  fitBounds(lng1 = min(data$fia_plots$x),
+                            lat1 = min(data$fia_plots$y),
+                            lng2 = max(data$fia_plots$x),
+                            lat2 = max(data$fia_plots$y))
       })
 
 
       ## Draw FIA points on the map -------------------------------
       observe({
-            req(data$fia_points)  # only run once we have data
+            req(data$fia_plots)  # only run once we have data
 
             proxy <- leafletProxy("map")
 
@@ -202,11 +209,10 @@ server <- function(input, output, session) {
 
 
             # add FIA points
-            points <- data$fia_points %>% select(x, y) %>% distinct()
-            if (!is.null(data$fia_points)) {
+            if (!is.null(data$fia_plots)) {
                   proxy <- proxy %>%
                         addCircles(
-                              data = points,
+                              data = data$fia_plots,
                               lng = ~x,
                               lat = ~y,
                               radius = point_radius, # meters
@@ -230,9 +236,9 @@ server <- function(input, output, session) {
       ## Build search indices for focal vars ----------------------
       observe({
             data$fia_idx_hst <- build_analog_index(
-                  data$fia_points[, c("x", "y", paste0(input$v1, 1), paste0(input$v2, 1))])
+                  data$fia_plots[, c("x", "y", paste0(input$v1, 1), paste0(input$v2, 1))])
             data$fia_idx_fut <- build_analog_index(
-                  data$fia_points[, c("x", "y", paste0(input$v1, 2), paste0(input$v2, 2))])
+                  data$fia_plots[, c("x", "y", paste0(input$v1, 2), paste0(input$v2, 2))])
       })
 
       ## Analog query on click or slider change ---------------------------------
@@ -253,9 +259,10 @@ server <- function(input, output, session) {
             max_k <- if(mode != "all") input$max_k else NULL
 
             # focal site climate
+            vars <- c(input$v1, input$v2)
             focal_clim <- terra::extract(data$climate_raster, matrix(c(lon, lat), nrow = 1))
-            focal_hst <- cbind(x = lon, y = lat, focal_clim[, paste0(vars(), 1)])
-            focal_fut <- cbind(x = lon, y = lat, focal_clim[, paste0(vars(), 2)])
+            focal_hst <- cbind(x = lon, y = lat, focal_clim[, paste0(vars, 1)])
+            focal_fut <- cbind(x = lon, y = lat, focal_clim[, paste0(vars, 2)])
 
             # store clicked location including climate
             data$focal_site <- data.frame(
@@ -264,9 +271,18 @@ server <- function(input, output, session) {
                   value = 1  # placeholder column
             ) %>% bind_cols(focal_clim)
 
+            # # find optimal res (one-time dev op, leaving her for ref)
+            # tune_index_res(
+            #       x = data$climate_raster[[c(paste0(input$v1, 1), paste0(input$v2, 1))]],
+            #       pool = data$fia_plots[, c("x", "y", paste0(input$v1, 1), paste0(input$v2, 1))],
+            #       select = mode, k = max_k,
+            #       max_clim = max_clim, max_geog = max_geog,
+            #       verbose = TRUE
+            # )
+
             # FIA analogs
             fia_query <- function(x, pool){
-                  a <- analogs::analog_search(x, pool, mode = mode, k = max_k,
+                  a <- analogs::analog_search(x, pool, select = mode, k = max_k,
                                               max_clim = max_clim, max_geog = max_geog)
                   if(input$mode == "Pareto front"){
                         # return the pareto-optimal subset of "all" analogs passing filters
@@ -281,9 +297,9 @@ server <- function(input, output, session) {
             fia_analogs_rev <- fia_query(focal_fut, data$fia_idx_hst)
 
             fia_analogs <- bind_rows(
-                  data$fia_points[fia_analogs_bsl$analog_index, ] %>% mutate(type = "baseline"),
-                  data$fia_points[fia_analogs_fwd$analog_index, ] %>% mutate(type = "forward"),
-                  data$fia_points[fia_analogs_rev$analog_index, ] %>% mutate(type = "reverse")
+                  data$fia_plots[fia_analogs_bsl$analog_index, ] %>% mutate(type = "baseline"),
+                  data$fia_plots[fia_analogs_fwd$analog_index, ] %>% mutate(type = "forward"),
+                  data$fia_plots[fia_analogs_rev$analog_index, ] %>% mutate(type = "reverse")
             )
 
             dists <- bind_rows(fia_analogs_bsl[,c("clim_dist", "geog_dist")],
@@ -320,8 +336,15 @@ server <- function(input, output, session) {
       observe({
             req(data$focal_site)
             set.seed(123)
-            cand <- data$fia_points %>%
-                  select(x, y, contains("1"), contains("2")) %>%
+
+            cand <- data$fia_plots_species %>%
+                  group_by(x, y) %>%
+                  mutate(ba_species = sum(basal_area[species == input$species]), # fixme
+                         ba_total = sum(basal_area)) %>%
+                  ungroup()
+
+            cand <- cand %>%
+                  select(x, y, ba_species, ba_total, contains("1"), contains("2")) %>%
                   distinct() %>%
                   mutate(geog_dist = geosphere::distHaversine(
                         cbind(x, y),
@@ -470,18 +493,41 @@ server <- function(input, output, session) {
                          v21 = bg[[v21]] * sd[2] + mean[2],
                          v12 = bg[[v12]] * sd[1] + mean[1],
                          v22 = bg[[v22]] * sd[2] + mean[2])
+            rnd <- function(x, res = 15) plyr::round_any(x, diff(range(x))/res)
+            bg1 <- bg %>%
+                  mutate(v11 = rnd(v11), v21 = rnd(v21)) %>%
+                  group_by(v11, v21) %>%
+                  summarize(n_plots = n(),
+                            ba_total = sum(ba_total),
+                            ba_species = sum(ba_species),
+                            ba_prop = ba_species / ba_total,
+                            ba_plot = ba_species / n_plots)
+            # bg2 <- bg %>%
+            #       mutate(v12 = rnd(v12), v22 = rnd(v22)) %>%
+            #       group_by(v12, v22) %>%
+            #       summarize(n_plots = n(),
+            #                 ba_total = sum(ba_total),
+            #                 ba_species = sum(ba_species),
+            #                 ba_prop = ba_species / ba_total,
+            #                 ba_plot = ba_species / n_plots)
+
 
             # build ggplot
             q <- .25
             ggplot() +
+                  geom_raster(data = bg1 %>% mutate(era = "baseline"),
+                                      aes(v11, v21, fill = ba_plot),
+                                      alpha = 1) +
+                  scale_fill_gradientn(colors = c("gray90", green)) +
                   geom_density_2d_filled(data = bg %>% mutate(era = "baseline"),
                                          aes(v11, v21, fill = NULL, linetype = era),
                                          breaks = c(q, 1), contour_var = "ndensity",
-                                         fill = green, color = green, alpha = .3, linewidth = .2) +
+                                         fill = NA, color = green, linewidth = .2) +
                   geom_density_2d_filled(data = bg %>% mutate(era = "future"),
                                          aes(v12, v22, fill = NULL, linetype = era),
                                          breaks = c(q, 1), contour_var = "ndensity",
-                                         fill = green, color = green, alpha = .3, linewidth = .2) +
+                                         fill = NA, color = green, linewidth = .2) +
+
                   geom_polygon(data = perims,
                                aes(v1, v2, group = era, linetype = era),
                                color = "gray40", linewidth = .5, fill = NA, alpha = .5) +
@@ -496,13 +542,13 @@ server <- function(input, output, session) {
                                yend = p$v2[p$era == "future"],
                                color = "red") +
                   geom_point(data = a,
-                             aes(v1, v2, shape = era, fill = type),
-                             size = 3) +
+                             aes(v1, v2, shape = era, color = type),
+                             size = 2) +
                   geom_point(data = p,
                              aes(v1, v2, shape = era),
-                             fill = "black", color = "white", size = 5) +
-                  scale_shape_manual(values = c(21, 24)) +
-                  scale_fill_manual(values = type_pal$color,
+                             color = "black", size = 5) +
+                  # scale_shape_manual(values = c(21, 24)) +
+                  scale_color_manual(values = type_pal$color,
                                     breaks = type_pal$type, guide = "none") +
                   theme_bw() +
                   theme(legend.position = "bottom") +
@@ -516,18 +562,34 @@ server <- function(input, output, session) {
       output$dist_plot <- renderPlot({
             req(data$fia_analogs)
 
+            rnd <- function(x, mx, res = 15) plyr::round_any(x + res/2, mx/res) - res/2
+            bg <- data$fia_candidates %>%
+                  mutate(geog_dist = rnd(geog_dist, input$max_geog),
+                         clim_dist = rnd(clim_dist, max(clim_dist))) %>%
+                  group_by(geog_dist, clim_dist) %>%
+                  summarize(n_plots = n(),
+                            ba_total = sum(ba_total),
+                            ba_species = sum(ba_species),
+                            ba_prop = ba_species / ba_total,
+                            ba_plot = ba_species / n_plots)
+
             p <- ggplot(data$fia_analogs,
-                        aes(geog_dist, clim_dist, fill = type, color = type)) +
+                        aes(geog_dist, clim_dist, #fill = type#, color = type
+                            )) +
+                  geom_raster(data = bg, aes(fill = ba_plot)) +
+
                   geom_vline(xintercept = input$max_geog) +
                   geom_hline(yintercept = input$max_clim) +
-                  geom_point(data = data$fia_candidates,
-                             color = green, fill = NA,
-                             size = 2, alpha = .5, shape = 16)
+                  # geom_point(data = data$fia_candidates,
+                  #            # color = green,
+                  #            aes(color = ba_species / ba_total),
+                  #            fill = NA,
+                  #            size = 2, alpha = .5, shape = 16)
 
             if(input$mode == "Pareto front") p <- p + geom_line(color = "black", linewidth = 1) + geom_line(linewidth = .5)
 
             p + geom_point(shape = 21, color = "black", size = 3) +
-                  scale_fill_manual(values = type_pal$color, breaks = type_pal$type, guide = "none") +
+                  # scale_fill_manual(values = type_pal$color, breaks = type_pal$type, guide = "none") +
                   scale_color_manual(values = type_pal$color, breaks = type_pal$type, guide = "none") +
                   scale_x_continuous(expand = c(0, 0), limits = c(0, max(data$fia_analogs$geog_dist * 1.25))) +
                   scale_y_continuous(expand = c(0, 0), limits = c(0, max(data$fia_analogs$clim_dist * 1.25))) +
