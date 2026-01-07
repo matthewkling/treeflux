@@ -2,6 +2,7 @@
 library(data.table)
 library(tidyverse)
 library(janitor)
+library(terra)
 select <- dplyr::select
 
 
@@ -11,7 +12,7 @@ dir <- "/Volumes/T7/FIA/2025_06_27"
 
 plot <- fread(paste0(dir, "/CSV_FIADB_ENTIRE/ENTIRE_PLOT.csv"), stringsAsFactors = F,
               colClasses = c(CN = "character")) %>%
-      select(PLT_CN = CN, MANUAL, DESIGNCD, PLOT_STATUS_CD, MACRO_BREAKPOINT_DIA,
+      select(PLT_CN = CN, MANUAL, DESIGNCD, PLOT_STATUS_CD, SAMP_METHOD_CD, MACRO_BREAKPOINT_DIA,
              STATECD, INVYR, MEASYEAR, UNITCD, COUNTYCD, PLOT,
              LAT, LON, ELEV) %>% as_tibble()
 
@@ -84,21 +85,52 @@ d <- plot %>%
       rename(macro_bpd = macro_breakpoint_dia) %>%
       mutate(macroplot = is.finite(macro_bpd)) %>%
 
-      mutate(yr = measyear) %>% # measurment year (not invyr) is the correct sampling date
+      mutate(yr = measyear) %>% # measurement year (not invyr) is the correct sampling date
       select(-invyr, -measyear)
+
 
 
 # summarize to plot-species level -------------------
 
 d <- d %>%
+      filter(lat < 50) %>%
       group_by(plot_id, subplot_id) %>%
-      filter(yr == max(yr), statuscd == 1, !is.na(statuscd)) %>%
-      mutate(species = paste(genus, species)) %>%
-      group_by(lon, lat, species) %>%
-      summarize(basal_area = sum(pi*(dia/2)^2 / 1550),
-                n_trees = n(),
-                .groups = "drop") # sq in to sq m
+      filter(yr == max(yr),
+             statuscd == 1 | is.na(statuscd) # live trees, or no trees
+      ) %>%
+      mutate(species = paste(genus, species),
+             species = ifelse(species == "NA NA", NA, species)) %>%
+      group_by(lon, lat, species, samp_method_cd) %>%
+      summarize(basal_area = sum(pi*(dia/2)^2 / 1550, na.rm = T), # sq in to sq m
+                n_trees = sum(!is.na(statuscd)),
+                .groups = "drop")
 
+
+
+# remove non-sampled plots with non-natural vegetation -----------------------
+
+# load and extract landfire existing vegetation type
+# veg <- rast("/Volumes/T7/landfire/LF2024_EVT_250_CONUS/Tif/LC24_EVT_250.tif") # load raster
+veg <- rast("/Volumes/T7/landfire/LF2020_BPS_220_CONUS/Tif/LC20_BPS_220.tif") # load raster
+dp <- vect(select(d, lon, lat))
+crs(dp) <- crs(rast("data/clim_quantized.tif"))
+dp <- project(dp, crs(veg))
+veg <- extract(veg, dp)
+
+# wild, non-forest vegetation
+# nonforest_veg <- c("Herb", "Shrub", "Sparse", "Barren", "Snow-Ice")
+# nonforest <- foreign::read.dbf("/Volumes/T7/landfire/LF2024_EVT_250_CONUS/Tif/LC24_EVT_250.tif.vat.dbf") %>%
+#       as_tibble() %>%
+#       filter(EVT_LF %in% nonforest_veg)
+
+nonforest_veg <- c("Barren-Rock/Sand/Clay", "Grassland", "Perennial Ice/Snow", "Riparian",
+                      "Savanna", "Shrubland", "Sparse")
+nonforest <- foreign::read.dbf("/Volumes/T7/landfire/LF2020_BPS_220_CONUS/Tif/LC20_BPS_220.tif.vat.dbf") %>%
+      as_tibble() %>%
+      filter(GROUPVEG %in% nonforest_veg)
+d <- d %>%
+      filter(samp_method_cd == 1 |
+                   veg$BPS_CODE %in% unique(nonforest$BPS_CODE))
 
 
 # merge with climate ----------------------------------
@@ -114,9 +146,9 @@ dc <- d %>%
       filter(between(x, bb$xmin, bb$xmax),
              between(y, bb$ymin, bb$ymax))
 
-# attach climate data
+# add climate data
 dc <- cbind(dc, terra::extract(climate, dc[,1:2]))
-
+dc <- filter(dc, is.finite(tmean1))
 
 # compute kde surface ------------------------------
 
