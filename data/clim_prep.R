@@ -115,3 +115,18 @@ writeRaster(
       gdal = c("COMPRESS=DEFLATE", "PREDICTOR=2"),
       overwrite = TRUE
 )
+
+
+# wind -------
+
+wind <- rast("/Volumes/T7/CFSR/multidecadal_roses/wnd10m_annual_p1.tif") %>%
+      rotate() %>%
+      crop(clim)
+writeRaster(
+      wind,
+      "data/wind_quantized.tif",
+      datatype = "INT2S",
+      scale = 0.01,
+      gdal = c("COMPRESS=DEFLATE", "PREDICTOR=2"),
+      overwrite = TRUE
+)
