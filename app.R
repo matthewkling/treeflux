@@ -10,22 +10,32 @@ library(shinybusy)
 library(leaflet.extras2)
 library(sf)
 library(leafgl)
+library(JuliaCall)
 
 
-## define global vars needed for UI ##
+## global setup ##
 
 clim_vars <- function() c("tmean", "ppt", "aet", "cwd", "tmincm", "tmaxwm")
 bbox_res <- 1
-clim_bbox <- as.vector(ext(clim_rast <- rast("../data/clim_quantized.tif")))
+clim_bbox <- as.vector(ext(clim_rast <- rast("data/clim_quantized.tif")))
 clim_bbox <- c(floor(clim_bbox[c(1, 3)] / bbox_res) * bbox_res, ceiling(clim_bbox[c(2, 4)] / bbox_res) * bbox_res)
 
-spp <- sort(unique(read_csv("../data/fia.csv")$species))
+spp <- sort(unique(read_csv("data/fia.csv")$species))
+
+julia_setup()
+julia_library("Circuitscape") # julia_install_package("Circiutscape")
+cs_stat_names <- c("current flow", "current on target", "current loss", "current direction", "conductance", "loss", "voltage")
+cs_stats <- c("current_flow", "current_detinations", "current_loss", "current_direction", "conductance", "loss", "voltage")
 
 
 # HELPER FUNCTIONS ------------------------------------
 
-circleLegend <- function(title, labels, colors, radius = 6) {
-      items <- Map(function(lbl, col) {
+circleLegend <- function(title, labels, colors, radii = 6) {
+      # If only one radius is provided, repeat it for all labels
+      if(length(radii) == 1) radii <- rep(radii, length(labels))
+
+      items <- Map(function(lbl, col, rad) {
+            # Use the 'rad' variable to define SVG dimensions and circle size
             sprintf(
                   "<div style='display:flex; align-items:center; margin:4px 0;'>
          <svg width='%d' height='%d' style='flex:0 0 auto;'>
@@ -33,10 +43,11 @@ circleLegend <- function(title, labels, colors, radius = 6) {
          </svg>
          <span style='margin-left:8px;'>%s</span>
        </div>",
-                  2*radius, 2*radius,
-                  radius, radius, radius, col, lbl
+                  12, 12, # Keep container size consistent for alignment
+                  6, 6,   # Center the circle in the 12x12 box
+                  rad, col, lbl
             )
-      }, labels, colors)
+      }, labels, colors, radii)
 
       HTML(sprintf(
             "<div class='leaflet-control'
@@ -47,9 +58,7 @@ circleLegend <- function(title, labels, colors, radius = 6) {
                  box-shadow: 0 0 15px rgba(0,0,0,0.2);
                  color: #444;
                  line-height: 18px;'>
-       <div style='font-weight:600;
-                   font-size:14px;
-                   margin-bottom:8px;'>%s</div>
+       <div style='font-weight:600; font-size:14px; margin-bottom:8px;'>%s</div>
        %s
      </div>",
             title,
@@ -57,13 +66,24 @@ circleLegend <- function(title, labels, colors, radius = 6) {
       ))
 }
 
+geo_circle <- function(pts, radius, thresh = .1) {
+      radius <- radius * 1000 # m to km
+      thresh <- thresh * 1000
 
-library(JuliaCall)
-julia_setup()
-julia_library("Circuitscape") # julia_install_package("Circiutscape")
-cs_stat_names <- c("current flow", "current on target", "current loss", "current direction", "conductance", "loss", "voltage")
-cs_stats <- c("current_flow", "current_detinations", "current_loss", "current_direction", "conductance", "loss", "voltage")
+      angles <- seq(from = 0, to = 360, by = 2)
+      vertices <- geosphere::destPoint(p = pts, b = angles, d = radius)
 
+      if(pts[1,1] > thresh) vertices[,1] <- ifelse(vertices[,1] > 0, vertices[,1], vertices[,1] + 360)
+      if(pts[1,1] < -thresh) vertices[,1] <- ifelse(vertices[,1] < 0, vertices[,1], vertices[,1] - 360)
+
+      vertices
+}
+
+clim_circle <- function(pt, radius, means, sds) {
+      angles <- seq(from = 0, to = 360, by = 2) / 180 * pi
+      as.data.frame(cbind(v1 = pt[1] * sds[1] + means[1] + cos(angles) * radius * sds[1],
+                          v2 = pt[2] * sds[2] + means[2] + sin(angles) * radius * sds[2]))
+}
 
 
 gradient_bearing <- function(target){
@@ -247,7 +267,7 @@ ui <- page_sidebar(
 
       fillable = TRUE,   # lets the page body fill the browser height
 
-      title = "FIA climate analog impact model",
+      title = "FORSITE",
 
 
       ## INPUTS ------------------------------------
@@ -263,13 +283,13 @@ ui <- page_sidebar(
 
                   accordion_panel(
                         "Info",
-                        p("This tool uses 'analog impact models' to interpolate FIA variables across
+                        p("The FORest Species Impact & Transition Estimator (FORSITE) uses
+                          'analog impact models' to interpolate FIA variables across
                           a spatial grid, based on geographic proximity and climatic similarity to
-                          FIA plots. Baseline-era models use present-day climate for both plots and
-                          interpolation sites, while future-era models compare current plot climate
-                          to predicted future climate at interpolation sites. The 'delta' between
-                          time periods thus gives a prediction for how species distribution properties
-                          could change.",
+                          FIA plots, optionally accounting for pedicted future climate.
+                          Use the tool to compare baseline and future surfaces to assess potential forest change,
+                          model connectivity between current and potential future distributions using Circuitscape,
+                          and explore properties of plots that are analogs to your focal sites.",
                           style = "font-size: 14px; color: #555;")
                   ),
 
@@ -289,25 +309,25 @@ ui <- page_sidebar(
 
                   accordion_panel(
                         "Climate data",
-                        p("Select climate variables and resolution"),
+                        helpText("Select climate variables and resolution"), hr(),
                         selectInput("clim_vars", NULL, clim_vars(), selected = c("cwd", "aet"), multiple = TRUE),
                         sliderInput("clim_agg", "Grain size (km; coarser = faster)", 1, 10, value = 10, step = 1)
                   ),
 
                   accordion_panel(
                         "Analog bandwidths",
-                        p("Set analog specificity parameters (Gaussian smoothing kernel standard deviations)",
-                          style = "font-size: 14px; color: #555;"),
+                        helpText("Analogs are weighted using Gaussian kernels based on climatic and geographic distances from a site.
+                                 Bandwidths specify the standard deviations of these kernels. Plots farther than 3 stdevs
+                                 are considered non-analog and excluded."), hr(),
                         sliderInput("theta_geog", "Geographic bandwidth (km)", 5, 100, value = 30),
                         sliderInput("theta_clim", "Climate bandwidth (z)", .05, .5, value = .1)
                   ),
 
                   accordion_panel(
                         "Connectivity",
-                        p("Parameters for circuit-based connectivity modeling dispersal from baseline (source) to future (target) FIA surfaces.",
-                          style = "font-size: 14px; color: #555;"),
+                        helpText("Parameters for circuit-based connectivity modeling dispersal from baseline (source) to future (target) FIA surfaces."), hr(),
                         selectInput("cs_sources", "Source electrodes", c("grid cells", "FIA plots", "selected site")),
-                        selectInput("cs_conductance_layer", "Horizontal conductance", c("uniform", "wind", "suitability")),
+                        selectInput("cs_conductance_layer", "Horizontal conductance", c("uniform", "wind", "suitability", "wind * suitability")),
                         sliderInput("cs_conductance_scale", "log10 conductance scale", -2, 2, value = 0, step = .1),
                         selectInput("cs_loss_layer", "Loss (non-target grounds)", c("none", "uniform", "mean suitability", "max suitability")),
                         sliderInput("cs_loss_scale", "log10 loss scale", -2, 2, value = -1, step = .1)
@@ -315,7 +335,7 @@ ui <- page_sidebar(
 
                   accordion_panel(
                         "Model outputs",
-                        p("Choose results to display or export"),
+                        helpText("Choose results to display or export"), hr(),
                         selectInput("fia_var", "FIA variable modeled",
                                     c("proportion basal area", "total basal area", "presence probability", "total basal area ALL species")),
                         selectInput("stat", "Raster variable mapped",
@@ -323,20 +343,12 @@ ui <- page_sidebar(
                         selectInput("time", "Raster variable timeframe",
                                     c("baseline", "future", "delta")),
                         selectInput("vector", "Vector element mapped",
-                                    c("occupied FIA plots", "all FIA plots", "current animation", "current field", "none")),
-                        # checkboxInput("shrink", "Apply ESS shrinkage", value = FALSE),
-                        # numericInput("ess50", "Shrinkage rate", 50, min = 5, max = NA, step = 1)
+                                    c("occupied FIA plots", "all FIA plots", "focal site analogs", "current animation", "current field", "none"))
                   ),
-
-                  # accordion_panel(
-                  #       "Map aesthetics",
-                  #       sliderInput("rast_opacity", "Raster opacity", 0, 1, value = .8, step = .01)
-                  # ),
 
                   accordion_panel(
                         "Export",
-                        p("Download the raster data displayed on the map as a .tif, or model settings as a .txt for reproducibility.",
-                          style = "font-size: 14px; color: #555;"),
+                        helpText("Download the raster data displayed on the map as a .tif, or model settings as a .txt for reproducibility."), hr(),
                         textInput("download_filename", "Filename (without extension)", "fia_aim_result"),
                         downloadButton("download_raster", "Download raster"),
                         br(),
@@ -348,16 +360,44 @@ ui <- page_sidebar(
 
       ## OUTPUTS ---------------------------------------
 
-      card( # make the main area a fillable card
+      card(
             class = "h-100 w-100 rounded-0 overflow-hidden border-0",
-            card_body(
-                  leafletOutput("map", height = "100%"),
-                  padding = 0
+            layout_sidebar(
+                  fillable = TRUE,
+
+                  # Sidebar with ggplots
+                  sidebar = sidebar(
+                        # title = "Focal site analogs",
+                        width = "40%",
+                        position = "right",
+                        open = TRUE,
+
+                        accordion(
+                              accordion_panel(
+                                    "Focal site analogs",
+                                    helpText("Click map to select focal site.
+                                             Purple reference lines illustrate bandwidths and hard cutoffs (3x bandwidth) for climatic and geographic distances."), hr(),
+                                    layout_column_wrap(
+                                          width = 1/3,
+                                          selectInput("analog_direction", NULL, c("Contemporary analogs", "Reverse analogs", "Forward analogs")),
+                                          actionButton("highlight_site", "Highlight on map"),
+                                          input_switch("filter_clim", "Exclude non-analog plots", TRUE)
+                                    ),
+
+                                    plotOutput("clim_plot"),
+                                    plotOutput("dist_plot"),
+                                    plotOutput("comp_plot")
+                              )
+                        )
+
+                  ),
+
+                  # Main leaflet map
+                  leafletOutput("map", height = "100%")
             )
       ),
 
-      add_busy_spinner(spin = "cube-grid", # "fading-circle",
-                       position = "bottom-right")
+      add_busy_spinner(spin = "cube-grid", position = "bottom-right")
 )
 
 
@@ -381,7 +421,7 @@ server <- function(input, output, session) {
 
       # all plots within bbox
       fia_plots <- reactive({
-            read_csv("../data/fia.csv", show_col_types = FALSE) %>%
+            read_csv("data/fia.csv", show_col_types = FALSE) %>%
                   select(x, y, aet1:tmaxwm2) %>%
                   distinct() %>%
                   filter(between(x, input$bbox_x[1], input$bbox_x[2]),
@@ -390,7 +430,7 @@ server <- function(input, output, session) {
       })
 
       fia_plots_species_all <- reactive({
-            read_csv("../data/fia.csv", show_col_types = FALSE) %>%
+            read_csv("data/fia.csv", show_col_types = FALSE) %>%
                   left_join(select(fia_plots(), x, y, index),
                             by = join_by(x, y))
       })
@@ -411,10 +451,12 @@ server <- function(input, output, session) {
                   mutate(baprop = ifelse(baplot == 0, 0, baprop))
       })
 
-      ## Focal site
-      site <- reactive({
-            c(input$map_click$lng, input$map_click$lat)
-      })
+      clim_scales <- readRDS("data/clim_scales.rds")
+
+
+      ## focal site
+      site <- reactiveValues(x = NULL, y = NULL)
+
 
 
       # REACTIVE UI COMPONENTS ---------------------------
@@ -448,50 +490,112 @@ server <- function(input, output, session) {
             }
       })
 
+      # highlight focal site analogs: activate correct vector layer; zoom to site
+      observeEvent(input$highlight_site, {
+            updateSelectInput(session, "vector", selected = "focal site analogs")
+
+            if(!is.null(site$y)){
+                  circle <- geo_circle(cbind(site$x, site$y), input$theta_geog * 3) %>%
+                        as.data.frame()
+
+                  leafletProxy("map") %>%
+                        fitBounds(lng1 = min(circle$lon),
+                                  lat1 = min(circle$lat),
+                                  lng2 = max(circle$lon),
+                                  lat2 = max(circle$lat))
+            }
+      })
 
 
       ## ANALOG IMPACT MODEL -----------------------------------------
 
-      aim <- reactive({
-            req(nzchar(input$species), plot_occ())
-
-            clim <- rast("../data/clim_quantized.tif")
-            clim_hst <- clim[[paste0(input$clim_vars, 1)]] %>%
+      clim <- reactive({
+            r <- rast("data/clim_quantized.tif")
+            clim_hst <- r[[paste0(input$clim_vars, 1)]] %>%
                   crop(ext(c(input$bbox_x, input$bbox_y))) %>%
                   aggregate(input$clim_agg, na.rm = TRUE)
-            clim_fut <- clim[[paste0(input$clim_vars, 2)]] %>%
+            clim_fut <- r[[paste0(input$clim_vars, 2)]] %>%
                   crop(ext(c(input$bbox_x, input$bbox_y))) %>%
                   aggregate(input$clim_agg, na.rm = TRUE)
+            list(hst = clim_hst, fut = clim_fut)
+      })
 
+      pool <- reactive({
+            req(plot_occ())
             xy <- plot_occ()[, c("x", "y")]
-            values <- plot_occ()[, c("pres", "batot", "baprop", "baplot")]
+            clim_hst <- extract(clim()$hst, xy, ID = FALSE, method = "bilinear")
+            clim_fut <- extract(clim()$fut, xy, ID = FALSE, method = "bilinear")
+            list(index_hst = build_analog_index(cbind(xy, clim_hst), coord_type = "lonlat", index_res = 8),
+                 index_fut = build_analog_index(cbind(xy, clim_fut), coord_type = "lonlat", index_res = 8),
+                 clim_hst = clim_hst,
+                 clim_fut = clim_fut,
+                 values = plot_occ()[, c("pres", "batot", "baprop", "baplot", "samp_method_cd")])
+      })
 
-            max_geog <- input$theta_geog * 3
-            max_clim <- input$theta_clim * 3
-            theta <- c(input$theta_clim, input$theta_geog)
+      ### full raster -----------------------
+      aim <- reactive({
 
-            pool <- cbind(xy, extract(clim_hst, plot_occ()[, c("x", "y")], ID = FALSE))
-
-            aim <- function(x){
+            aim_query <- function(x){
                   suppressWarnings(analogs::analog_impact(
-                        x = x, pool = pool, max_clim = max_clim, max_geog = max_geog,
+                        x = x,
+                        pool = pool()$index_hst,
+                        max_clim = input$theta_clim * 3,
+                        max_geog = input$theta_geog * 3,
                         stat = c("count", "sum_weights", "weighted_mean", "ess"),
-                        weight = "gaussian_joint", theta = theta, values = values))
+                        weight = "gaussian_joint",
+                        theta = c(input$theta_clim, input$theta_geog),
+                        values = pool()$values))
             }
 
-            aim_bsl <- aim(clim_hst)
-            aim_fut <- aim(clim_fut)
+            aim_bsl <- aim_query(clim()$hst)
+            aim_fut <- aim_query(clim()$fut)
             names(aim_bsl) <- names(aim_fut) <- gsub("weighted_mean_", "", names(aim_fut))
 
             list(fut = aim_fut,
                  bsl = aim_bsl)
       })
 
+      ### focal site ------------------------
+      site_analogs <- reactive({
+            req(site$x, site$y)
+
+            xy <- t(as.matrix(c(x = site$x, y = site$y), nrow = 1))
+            hst <- cbind(xy, extract(clim()$hst, xy, method = "bilinear"))
+            fut <- cbind(xy, extract(clim()$fut, xy, method = "bilinear"))
+
+            max_clim <- if(input$filter_clim) input$theta_clim * 3 else NULL
+
+            analog_query <- function(x, pool){
+                  suppressWarnings(analogs::analog_search(
+                        x = x,
+                        pool = pool,
+                        max_geog = input$theta_geog * 3,
+                        max_clim = max_clim,
+                        select = "all",
+                        stat = NULL,
+                        values = cbind(pool()$values, pool()$clim_hst, pool()$clim_fut)
+                  ))
+            }
+
+            rev <- analog_query(fut, pool()$index_hst)
+            fwd <- analog_query(hst, pool()$index_fut)
+            bsl <- analog_query(hst, pool()$index_hst)
+
+            list(hst_site = hst,
+                 fut_site = fut,
+                 rev_analogs = rev,
+                 fwd_analogs = fwd,
+                 bsl_analogs = bsl
+            )
+      })
+
+
+
 
       ## CIRCUITSCAPE -------------------------------------------------
 
       wind <- reactive({
-            rast("../data/wind_quantized.tif") %>%
+            rast("data/wind_quantized.tif") %>%
                   resample(aim()$bsl[[1]], method = "bilinear", threads = TRUE)
       })
 
@@ -499,7 +603,7 @@ server <- function(input, output, session) {
       electrodes <- reactive({
             if(input$cs_sources == "grid cells"){
                   sources <- aim()$bsl[[var()]]
-            }else if(input$cs_sources == "selected site" && !is.null(site())){
+            }else if(input$cs_sources == "selected site" && !is.null(site$y)){
                   xy <- matrix(site(), nrow = 1)
                   sources <- aim()$bsl[[var()]]
                   sources <- rasterize(xy, sources) # * extract(sources, xy)[1,1]
@@ -522,7 +626,7 @@ server <- function(input, output, session) {
             c(sources %>% setNames("sources"),
               destinations %>% setNames("destinations"))
       })
-
+      "wind * suitability"
       # horizontal conductance
       resistance <- reactive({
             if(input$cs_conductance_layer == "wind"){
@@ -531,6 +635,9 @@ server <- function(input, output, session) {
                   # note: consider adding a minimum conductance to account for local diffusion
             } else if(input$cs_conductance_layer == "suitability") {
                   conductance <- sqrt(electrodes()$sources * electrodes()$destinations)
+            } else if(input$cs_conductance_layer == "wind * suitability") {
+                  bearing <- gradient_bearing(electrodes()$destinations)
+                  conductance <- aligned_flux(bearing, wind()) * sqrt(electrodes()$sources * electrodes()$destinations)
             } else { # uniform conductance
                   # v <- 10^input$cs_conductance
                   conductance <- setValues(electrodes()$sources, 1)
@@ -594,7 +701,9 @@ write_volt_maps = False
             julia_command("GC.gc()")
 
             # Read results back into R
-            current <- rast("circuitscape/result_curmap.asc") %>% setNames("current_flow")
+            current <- rast("circuitscape/result_curmap.asc") %>%
+                  "+"(0) %>% # force into memory
+                  setNames("current_flow")
             voltage <- setValues(current, voltage) %>% setNames("voltage")
             curr_ground <- grounds %>% "*"(voltage) %>% setNames("current_ground")
             curr_dest <- electrodes()$destinations %>% "*"(voltage) %>% setNames("current_detinations")
@@ -603,10 +712,10 @@ write_volt_maps = False
             curr_dir <- gradient_bearing(-voltage) %>% setNames("current_direction")
 
             # Clean temp files
-            # file.remove(list.files("circuitscape", full.names = T))
+            file.remove(list.files("circuitscape", full.names = T))
 
-            c(current + 0, # force minmax calc
-              voltage, curr_dest, curr_loss, resistance()$conductance, leakage(), curr_dir) %>%
+            c(current, voltage, curr_dest, curr_loss,
+              resistance()$conductance, leakage(), curr_dir) %>%
                   mask(aim()$bsl[[var()]])
       })
 
@@ -634,10 +743,43 @@ write_volt_maps = False
                   addControl(
                         sliderInput("rast_opacity", "Raster opacity", 0, 1, value = .8, step = .01, width = "150px"),
                         position = "bottomright"
+                  ) %>%
+
+                  addScaleBar(
+                        position = "bottomleft",
+                        options = scaleBarOptions(
+                              metric = TRUE, # Show kilometers/meters
+                              imperial = FALSE, # Hide miles/feet
+                              updateWhenIdle = TRUE # Update only after the user stops zooming/panning
+                        )
                   )
       })
 
+
       ### Focal site -----------------------------
+      observe({
+            if(!is.null(input$map_click)){
+                  site$x <- input$map_click$lng
+                  site$y <- input$map_click$lat
+
+                  r1 <- geo_circle(cbind(site$x, site$y), input$theta_geog)
+                  r3 <- geo_circle(cbind(site$x, site$y), input$theta_geog * 3)
+
+                  leafletProxy("map") %>%
+                        clearGroup("focal_site") %>%
+                        addCircles(lng = site$x, lat = site$y,
+                                   radius = input$theta_geog / 10,
+                                   opacity = 1, fillOpacity = .5, color = "#4c32a8",
+                                   group = "focal_site") %>%
+                        addPolygons(lng = r1[,1], lat = r1[,2],
+                                    color = "#4c32a8", weight = 2, fill = FALSE,
+                                    dashArray = "12, 5",
+                                    group = "focal_site") %>%
+                        addPolygons(lng = r3[,1], lat = r3[,2],
+                                    color = "#4c32a8", weight = 2, fill = FALSE,
+                                    group = "focal_site")
+            }
+      })
 
 
       ### Raster -------------------------------
@@ -662,32 +804,15 @@ write_volt_maps = False
                               "future" = aim()$fut[[var()]])
             }
 
-            # if(input$shrink && input$stat == "FIA variable"){
-            #       # works for delta, and for estimate if we assume that no nearby samples means no forest
-            #       ess <- switch(input$time,
-            #                     delta = 2 / (1/aim()$fut$ess + 1/aim()$bsl$ess), # harmonic mean
-            #                     baseline = aim()$bsl$ess,
-            #                     future = aim()$fut$ess)
-            #       k <- input$ess50 # ESS at which the effect is shrunk by 50% (default was 100)
-            #       shrinkage <- ess / (ess + k)
-            #       #prior_mean <- 0 # shrink toward this value
-            #       r <- r * shrinkage #+ shrinkage * prior_mean
-            # }
-
             r
       })
 
       observe({
             req(display_layer())
 
-            proxy <- leafletProxy("map")
-
-            ## clear old layers ##
-            proxy %>%
+            proxy <- leafletProxy("map") %>%
                   clearImages() %>%
                   removeControl("raster_legend")
-
-            ## add raster ##
 
             ## palettes ##
             mm <- minmax(display_layer())
@@ -771,23 +896,36 @@ write_volt_maps = False
       observe({
             req(plot_occ())
 
+            test <- site_analogs()
+
             proxy <- leafletProxy("map")
 
             ## clear old layers ##
             proxy %>%
-                  clearMarkers() %>%
+                  # clearMarkers() %>%
                   clearGroup("FIA plots") %>%
                   clearGroup("current_flow") %>%
                   clearGroup("current_field") %>%
                   removeControl("point_legend")
 
-            if(input$vector %in% c("all FIA plots", "occupied FIA plots")){
+            if(input$vector %in% c("all FIA plots", "occupied FIA plots", "focal site analogs")){
 
-                  pd <- plot_occ()
+                  if(input$vector == "focal site analogs"){
+                        pd <- switch(input$analog_direction,
+                                     "Reverse analogs" = site_analogs()$rev_analogs,
+                                     "Forward analogs" = site_analogs()$fwd_analogs,
+                                     "Contemporary analogs" = site_analogs()$bsl_analogs) %>%
+                              mutate(x = analog_x, y = analog_y)
+                  } else {
+                        pd <- plot_occ()
+                  }
+
                   pd$display <- pd[[var()]]
+
                   if(input$vector == "occupied FIA plots") pd <- filter(pd, display > 0)
 
-                  dom <- if(var() %in% c("batot", "baplot")) c(0, max(pd$display)) else 0:1
+                  dom <- if(var() %in% c("batot", "baplot")) c(0, max(pd$display, na.rm = TRUE)) else 0:1
+
                   plot_pal <- colorNumeric(palette = c("gray90", green),
                                            domain = dom)
                   breaks <- pretty(seq(dom[1], dom[2], length.out = 100), n = 5)
@@ -797,7 +935,7 @@ write_volt_maps = False
                               data = filter(pd, samp_method_cd == 2),
                               lng = ~x,
                               lat = ~y,
-                              radius = point_radius/3, # meters
+                              radius = point_radius/2, # meters
                               stroke = FALSE, fillColor = "black",
                               group = "FIA plots"
                         ) %>%
@@ -812,13 +950,18 @@ write_volt_maps = False
                               group = "FIA plots"
                         )
 
+                  # legend
+                  breaks <- pretty(seq(dom[1], dom[2], length.out = 100), n = 5)
+                  legend_labels <- c(breaks, "Non-sampled plot")
+                  legend_colors <- c(plot_pal(breaks), "gray") # gray, to match the semi-transparent black markers
+                  legend_radii <- c(rep(6, length(breaks)), 3)
                   proxy <- proxy %>%
                         addControl(
                               circleLegend(
                                     title  = HTML(paste(input$fia_var, "(FIA plots, baseline)", sep = "<br/>")),
-                                    labels = breaks,
-                                    colors = plot_pal(breaks),
-                                    radius = 6
+                                    labels = legend_labels,
+                                    colors = legend_colors,
+                                    radii = legend_radii
                               ),
                               position = "topright",
                               layerId  = "point_legend",
@@ -835,8 +978,11 @@ write_volt_maps = False
                               options = velocityOptions(
                                     colorScale = c("#000000", "#000000"),
                                     lineWidth = 2,
-                                    velocityScale = 0.25,
-                                    particleMultiplier = 0.001
+                                    velocityScale = 25,
+                                    particleMultiplier = 0.005,
+                                    displayValues = FALSE,
+                                    velocityType = "Current",
+                                    emptyString = "No current data"
                               ),
                               group = "current_flow"
                         )
@@ -849,34 +995,178 @@ write_volt_maps = False
                                         subsample = 11 - input$clim_agg,
                                         arrow_scale = .1)
 
-                  pl <- colorNumeric(palette = c("gray90", "black"), domain = sqrt(spokes$lines$mag))
+                  line_pal <- colorNumeric(palette = c("gray90", "black"), domain = sqrt(spokes$lines$mag))
+                  point_pal <- colorNumeric(palette = c("gray90", "black"), domain = sqrt(spokes$points$mag))
 
                   proxy <- proxy %>%
-                        addGlPolylines(data = spokes$lines, color = pl(sqrt(spokes$lines$mag)), weight = .25,
+                        addGlPolylines(data = spokes$lines, color = line_pal(sqrt(spokes$lines$mag)), weight = .25,
                                        group = "current_field") %>%
                         addCircles(
                               data = spokes$points %>% bind_cols(st_coordinates(spokes$points)),
                               lng = ~X, lat = ~Y,
-                              radius = point_radius/3, fillOpacity = 1,
-                              stroke = FALSE, fillColor = pl(sqrt(spokes$points$mag)),
+                              radius = point_radius/2,
+                              fillOpacity = 1, stroke = FALSE, fillColor = point_pal(sqrt(spokes$points$mag)),
                               group = "current_field"
                         )
             }
 
-
-            # ## add layer controls ##
-            # proxy <- proxy %>%
-            #       addLayersControl(
-            #             overlayGroups = c("AIM results", "FIA plots"),
-            #             options = layersControlOptions(collapsed = FALSE)
-            #       )
       })
 
 
-      output$plot1 <- renderPlot({
-            ggplot(mtcars, aes(mpg, cyl)) + geom_point()
+      ## PLOTS ----------------------------
+
+      ### climate space --------------------------------
+      output$clim_plot <- renderPlot({
+            req(site_analogs())
+            a <- site_analogs()
+
+            v1 <- input$clim_vars[1]
+            v2 <- tail(input$clim_vars, 1) # if only one var selected, v2 == v1
+            scl1 <- clim_scales[[v1]]
+            scl2 <- clim_scales[[v2]]
+
+            if(input$analog_direction == "Reverse analogs"){
+                  d <- a$rev_analogs
+                  d$v1 <- d[[paste0(v1, "1")]]
+                  d$v2 <- d[[paste0(v2, "1")]]
+                  s <- a$fut_site
+            }else if(input$analog_direction == "Forward analogs"){
+                  d <- a$fwd_analogs
+                  d$v1 <- d[[paste0(v1, "2")]]
+                  d$v2 <- d[[paste0(v2, "2")]]
+                  s <- a$hst_site
+            }else if(input$analog_direction == "Contemporary analogs"){
+                  d <- a$bsl_analogs
+                  d$v1 <- d[[paste0(v1, "1")]]
+                  d$v2 <- d[[paste0(v2, "1")]]
+                  s <- a$hst_site
+            }else{
+                  stop("bug")
+            }
+
+            d$v1 <- d$v1 * scl1$sd + scl1$mean
+            d$v2 <- d$v2 * scl2$sd + scl2$mean
+
+            d$value <- d[[var()]]
+            d <- arrange(d, value)
+
+
+            # search perimeters
+            names(s) <- gsub("1|2", "", names(s))
+            perims <- rbind(clim_circle(c(s[[v1]], s[[v2]]), input$theta_clim,
+                                        c(scl1$mean, scl2$mean), c(scl1$sd, scl2$sd)) %>%
+                                  mutate(r = "b"),
+                            clim_circle(c(s[[v1]], s[[v2]]), input$theta_clim * 3,
+                                        c(scl1$mean, scl2$mean), c(scl1$sd, scl2$sd)) %>%
+                                  mutate(r = "a"))
+
+            dom <- if(var() %in% c("batot", "baplot")) c(0, max(d$value, na.rm = TRUE)) else 0:1
+
+            p <- ggplot() +
+                  geom_path(data = perims,
+                            aes(v1, v2, group = r, linetype = r),
+                            color = "#4c32a8", linewidth = .5, alpha = .5) +
+                  geom_point(data = filter(d, samp_method_cd == 2),
+                             aes(v1, v2, fill = value),
+                             color = "gray60", size = 1.5) +
+                  geom_point(data = filter(d, samp_method_cd == 1),
+                             aes(v1, v2, fill = value),
+                             shape = 21, color = "black", size = 3) +
+                  annotate(geom = "point",
+                           x = s[[v1]] * scl1$sd + scl1$mean,
+                           y = s[[v2]] * scl2$sd + scl2$mean,
+                           color = "#4c32a8", size = 4, alpha = .5) +
+                  scale_fill_gradientn(colors = c("gray90", green), limits = dom) +
+                  scale_linetype(guide = "none") +
+                  theme_bw() +
+                  theme(legend.position = "none") +
+                  labs(y = v1,
+                       x = v2)
+
+            if(nrow(filter(d, clim_dist <= input$theta_clim * 3)) == 0){
+                  p <- p +
+                        annotate(geom = "text", color = "red",
+                                 label = "No FIA plots found\nwithin geographic & climatic range\nof focal site",
+                                 x = mean(perims$v1), y = mean(perims$v2))
+            }
+
+            p
       })
 
+
+      ### distance space --------------------------------
+      output$dist_plot <- renderPlot({
+            req(site_analogs())
+
+            d <- switch(input$analog_direction,
+                        "Reverse analogs" = site_analogs()$rev_analogs,
+                        "Forward analogs" = site_analogs()$fwd_analogs,
+                        "Contemporary analogs" = site_analogs()$bsl_analogs)
+            d$value <- d[[var()]]
+            d <- arrange(d, value)
+
+            dom <- if(var() %in% c("batot", "baplot")) c(0, max(d$value, na.rm = TRUE)) else 0:1
+
+            ggplot(d, aes(geog_dist, clim_dist, fill = value)) +
+                  geom_vline(xintercept = input$theta_geog, linetype = "longdash", color = "#4c32a8", alpha = .5) +
+                  geom_vline(xintercept = input$theta_geog * 3, color = "#4c32a8", alpha = .5) +
+                  geom_hline(yintercept = input$theta_clim, linetype = "longdash", color = "#4c32a8", alpha = .5) +
+                  geom_hline(yintercept = input$theta_clim * 3, color = "#4c32a8", alpha = .5) +
+                  scale_x_continuous(expand = c(0, 0), limits = c(0, input$theta_geog * 3.3)) +
+                  scale_y_continuous(expand = c(0, 0), limits = c(0, input$theta_clim * 3.3)) +
+
+                  geom_point(data = filter(d, samp_method_cd == 2), color = "gray60", size = 1.5) +
+                  geom_point(data = filter(d, samp_method_cd == 1), shape = 21, color = "black", size = 3) +
+
+                  annotate(geom = "point", x = 0, y = 0, color = "#4c32a8", size = 5, alpha = .5) +
+
+                  scale_fill_gradientn(colors = c("gray90", green), limits = dom) +
+                  theme_bw() +
+                  theme(legend.position = "none") +
+                  labs(y = "Climate difference from focal site (z-score)",
+                       x = "Geographic distane to focal site (km)")
+      })
+
+      ### forest composition --------------------------------
+      output$comp_plot <- renderPlot({
+            d <- switch(input$analog_direction,
+                        "Reverse analogs" = site_analogs()$rev_analogs,
+                        "Forward analogs" = site_analogs()$fwd_analogs,
+                        "Contemporary analogs" = site_analogs()$bsl_analogs)
+
+            analogs <- plot_occ()[d$analog_index, ] %>%
+                  select(x, y) %>%
+                  bind_cols(select(d, clim_dist, geog_dist)) %>%
+                  mutate(weight = dnorm(clim_dist, sd = input$theta_clim) * dnorm(geog_dist, sd = input$theta_geog)) %>%
+                  left_join(fia_plots_species_all(), by = join_by(x, y))
+
+            a <- analogs %>%
+                  select(x, y, weight, species) %>%
+                  tidyr::expand(tidyr::nesting(x, y, weight), species) %>%
+                  left_join(analogs) %>%
+                  mutate(basal_area = ifelse(is.na(basal_area), 0, basal_area)) %>%
+                  group_by(x, y) %>%
+                  mutate(baplot = sum(basal_area),
+                         baprop = basal_area / sum(basal_area),
+                         baprop = ifelse(is.finite(baprop), baprop, 0)) %>%
+                  group_by(species) %>%
+                  summarize(
+                        pres = weighted.mean(basal_area > 0, weight),
+                        batot = weighted.mean(basal_area, weight),
+                        baprop = weighted.mean(baprop, weight),
+                        baplot = weighted.mean(baplot, weight)
+                  ) %>%
+                  filter(!is.na(species))
+
+            a$value <- a[[var()]]
+
+            ggplot(a, aes(value, species)) +
+                  geom_bar(stat = "identity", fill = green) +
+                  scale_x_continuous(limits = c(0, max(a$value) * 1.1), expand = c(0, 0)) +
+                  theme_bw() +
+                  labs(y = NULL,
+                       x = paste(input$fia_var, "(kernel-weighted mean across analogs)"))
+      })
 
       # DOWNLOADS --------------------------------------
       output$download_raster <- downloadHandler(
