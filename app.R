@@ -267,10 +267,12 @@ ui <- page_sidebar(
 
       fillable = TRUE,   # lets the page body fill the browser height
 
-      title = "FORSITE",
+      # "FORSITE" FORest Species Impact & Transition Explorer
+      # "FLAIM" Forest Landscape Analog Impact Model
+      title = "FIA climate analog explorer",
 
 
-      ## INPUTS ------------------------------------
+      ## LEFT SIDEBAR ------------------------------------
 
       sidebar = sidebar(
             open = "always",
@@ -283,8 +285,7 @@ ui <- page_sidebar(
 
                   accordion_panel(
                         "Info",
-                        p("The FORest Species Impact & Transition Estimator (FORSITE) uses
-                          'analog impact models' to interpolate FIA variables across
+                        p("This tool uses 'analog impact models' to interpolate FIA variables across
                           a spatial grid, based on geographic proximity and climatic similarity to
                           FIA plots, optionally accounting for pedicted future climate.
                           Use the tool to compare baseline and future surfaces to assess potential forest change,
@@ -309,9 +310,11 @@ ui <- page_sidebar(
 
                   accordion_panel(
                         "Climate data",
-                        helpText("Select climate variables and resolution"), hr(),
+                        helpText("Climate variables"),
                         selectInput("clim_vars", NULL, clim_vars(), selected = c("cwd", "aet"), multiple = TRUE),
-                        sliderInput("clim_agg", "Grain size (km; coarser = faster)", 1, 10, value = 10, step = 1)
+
+                        helpText("Raster grain size (precision vs. speed)"),
+                        sliderInput("clim_agg", NULL, 1, 10, value = 10, step = 1, post = " km")
                   ),
 
                   accordion_panel(
@@ -324,20 +327,10 @@ ui <- page_sidebar(
                   ),
 
                   accordion_panel(
-                        "Connectivity",
-                        helpText("Parameters for circuit-based connectivity modeling dispersal from baseline (source) to future (target) FIA surfaces."), hr(),
-                        selectInput("cs_sources", "Source electrodes", c("grid cells", "FIA plots", "selected site")),
-                        selectInput("cs_conductance_layer", "Horizontal conductance", c("uniform", "wind", "suitability", "wind * suitability")),
-                        sliderInput("cs_conductance_scale", "log10 conductance scale", -2, 2, value = 0, step = .1),
-                        selectInput("cs_loss_layer", "Loss (non-target grounds)", c("none", "uniform", "mean suitability", "max suitability")),
-                        sliderInput("cs_loss_scale", "log10 loss scale", -2, 2, value = -1, step = .1)
-                  ),
-
-                  accordion_panel(
                         "Model outputs",
                         helpText("Choose results to display or export"), hr(),
                         selectInput("fia_var", "FIA variable modeled",
-                                    c("proportion basal area", "total basal area", "presence probability", "total basal area ALL species")),
+                                    c("presence probability", "proportion basal area", "total basal area", "total basal area ALL species")),
                         selectInput("stat", "Raster variable mapped",
                                     c("FIA variable", "ESS", cs_stat_names)),
                         selectInput("time", "Raster variable timeframe",
@@ -358,14 +351,15 @@ ui <- page_sidebar(
       ),
 
 
-      ## OUTPUTS ---------------------------------------
 
       card(
             class = "h-100 w-100 rounded-0 overflow-hidden border-0",
             layout_sidebar(
                   fillable = TRUE,
 
-                  # Sidebar with ggplots
+
+                  ## RIGHT SIDEBAR ---------------------------------------
+
                   sidebar = sidebar(
                         # title = "Focal site analogs",
                         width = "40%",
@@ -373,12 +367,17 @@ ui <- page_sidebar(
                         open = TRUE,
 
                         accordion(
+                              open = FALSE,
+                              multiple = FALSE,
+
                               accordion_panel(
                                     "Focal site analogs",
-                                    helpText("Click map to select focal site.
-                                             Purple reference lines illustrate bandwidths and hard cutoffs (3x bandwidth) for climatic and geographic distances."), hr(),
+                                    helpText(
+                                          "This module lets you explore climate analogs for individual sites of interest.
+                                          Click the map to select a site; the plots below display properties of FIA plots that are both geographically close, and climatically similar, to your site.
+                                          Purple reference lines illustrate bandwidths and hard cutoffs (3x bandwidth) for geographic and climatic distances."), hr(),
                                     layout_column_wrap(
-                                          width = 1/3,
+                                          width = 1/2,
                                           selectInput("analog_direction", NULL, c("Contemporary analogs", "Reverse analogs", "Forward analogs")),
                                           actionButton("highlight_site", "Highlight on map"),
                                           input_switch("filter_clim", "Exclude non-analog plots", TRUE)
@@ -387,12 +386,51 @@ ui <- page_sidebar(
                                     plotOutput("clim_plot"),
                                     plotOutput("dist_plot"),
                                     plotOutput("comp_plot")
-                              )
+                              ),
+
+                              accordion_panel(
+                                    "Connectivity",
+                                    helpText("This tool models circuit-based landscape connectivity between baseline (source) and future (target) FIA surfaces."), hr(),
+
+                                    layout_column_wrap(
+                                          width = 1/2,
+                                          selectInput("cs_sources", "Origin electrodes (sources)", c("grid cells", "FIA plots", "selected site")),
+                                          selectInput("cs_targets", "Destination electrodes (target grounds)", c("grid cells", "FIA plots", "selected site")),
+                                          selectInput("cs_conductance_layer", "Horizontal conductance", c("suitability", "wind", "suitability * wind", "uniform")),
+                                          selectInput("cs_loss_layer", "Loss (non-target grounds)", c("none", "uniform", "mean suitability", "max suitability")),
+                                          sliderInput("cs_conductance_scale", "log10 conductance scale", -2, 2, value = 0, step = .1),
+                                          sliderInput("cs_loss_scale", "log10 loss scale", -2, 2, value = -1, step = .1)
+                                    )
+                              ),
+
+                              accordion_panel(
+                                    "Model evaluation",
+                                    helpText("This module uses cross-validation to assess the accuracy of contemporary AIM predictions for the selected species and FIA variable.
+                                             The first plot shows predicted versus observed values for the currently-selected model parameters."), br(),
+                                    plotOutput("eval_scatter"), hr(),
+
+                                    helpText("The tool below helps you explore how different parameter values affect predictive accuracy.
+                                             For bandwidth parameters, it tests five values bracketing the value selected under 'Analog bandwidths'.
+                                             For climate variables, it tests all combinations of the variables selected under 'Climate data', using the selected grain size."), br(),
+
+                                    layout_column_wrap(
+                                          width = 1/2,
+                                          checkboxGroupInput("eval_params", NULL,
+                                                             choiceNames = c("Test geographic bandwidths", "Test climate bandwidths", "Test climate variables"),
+                                                             choiceValues = c("geog", "clim", "vars")),
+                                          selectInput("eval_stat", "Evaluation statistic",  c("R-squared", "RMSE", "delta AIC")),
+                                          sliderInput("eval_n_vars", "Max n climate vars", 1, 6, value = c(1, 2), step = 1),
+                                          actionButton("optimal_params", "Apply optimal parameters"),
+                                          actionButton("run_eval", "Run evaluations")
+                                    ),
+
+                                    plotOutput("eval_heatmap", height = "600px")
+                              ),
                         )
 
                   ),
 
-                  # Main leaflet map
+                  ## MAP ---------------------------------------
                   leafletOutput("map", height = "100%")
             )
       ),
@@ -592,19 +630,19 @@ server <- function(input, output, session) {
 
 
 
-      ## CIRCUITSCAPE -------------------------------------------------
+      ## CONNECTIVITY -------------------------------------------------
 
       wind <- reactive({
             rast("data/wind_quantized.tif") %>%
                   resample(aim()$bsl[[1]], method = "bilinear", threads = TRUE)
       })
 
-      # sources and target grounds
+      ### Sources and targets ----------
       electrodes <- reactive({
             if(input$cs_sources == "grid cells"){
                   sources <- aim()$bsl[[var()]]
             }else if(input$cs_sources == "selected site" && !is.null(site$y)){
-                  xy <- matrix(site(), nrow = 1)
+                  xy <- matrix(c(site$x, site$y), nrow = 1)
                   sources <- aim()$bsl[[var()]]
                   sources <- rasterize(xy, sources) # * extract(sources, xy)[1,1]
             }else{
@@ -619,15 +657,29 @@ server <- function(input, output, session) {
             sources[is.na(sources[])] <- 0
             sources <- sources / global(sources, "sum")$sum
 
-            destinations <- aim()$fut[[var()]]
+            if(input$cs_targets == "grid cells"){
+                  destinations <- aim()$fut[[var()]]
+            }else if(input$cs_targets == "selected site" && !is.null(site$y)){
+                  xy <- matrix(c(site$x, site$y), nrow = 1)
+                  destinations <- aim()$fut[[var()]]
+                  destinations <- rasterize(xy, destinations) # * extract(destinations, xy)[1,1]
+            }else{
+                  # fia plots
+                  v <- plot_occ()[, c("x", "y")]
+                  v$z <- plot_occ()[[var()]]
+                  v <- v[v$z > 0,]
+                  v <- vect(v, geom = c("x", "y"))
+                  v <- rasterize(v, aim()$bsl[[var()]], field = "z")
+                  destinations <- v
+            }
             destinations[is.na(destinations[])] <- 0
             destinations <- destinations / global(destinations, "sum")$sum
 
             c(sources %>% setNames("sources"),
               destinations %>% setNames("destinations"))
       })
-      "wind * suitability"
-      # horizontal conductance
+
+      ### Resistance --------------
       resistance <- reactive({
             if(input$cs_conductance_layer == "wind"){
                   bearing <- gradient_bearing(electrodes()$destinations)
@@ -635,7 +687,7 @@ server <- function(input, output, session) {
                   # note: consider adding a minimum conductance to account for local diffusion
             } else if(input$cs_conductance_layer == "suitability") {
                   conductance <- sqrt(electrodes()$sources * electrodes()$destinations)
-            } else if(input$cs_conductance_layer == "wind * suitability") {
+            } else if(input$cs_conductance_layer == "suitability * wind") {
                   bearing <- gradient_bearing(electrodes()$destinations)
                   conductance <- aligned_flux(bearing, wind()) * sqrt(electrodes()$sources * electrodes()$destinations)
             } else { # uniform conductance
@@ -649,7 +701,7 @@ server <- function(input, output, session) {
             c(conductance, resistance)
       })
 
-      # vertical current loss
+      ### Loss ---------------------
       leakage <- reactive({
             loss <- switch(input$cs_loss_layer,
                            "none" = setValues(electrodes()$sources, 1e-6),
@@ -663,6 +715,7 @@ server <- function(input, output, session) {
             loss
       })
 
+      ### Circuitscape --------------
       connectivity <- reactive({
 
             grounds <- (electrodes()$destinations + leakage()) %>% setNames("grounds")
@@ -863,8 +916,7 @@ write_volt_maps = False
             if(input$stat == "ESS"){
                   title <- input$stat
             }else{
-                  title <- paste0(input$species, ":<br/>", input$time, " ",
-                                  tolower(sub(" ", "<br/>", input$fia_var)))
+                  title <- paste0(input$time, " ", tolower(sub(" ", "<br/>", input$fia_var)))
                   if(input$fia_var %in% c("total basal area", "total basal area ALL species")){
                         title <- paste0(title, "<br/>(m2 BA / plot)")
                   }
@@ -895,8 +947,6 @@ write_volt_maps = False
       ### Vectors ----------------------------
       observe({
             req(plot_occ())
-
-            test <- site_analogs()
 
             proxy <- leafletProxy("map")
 
@@ -1013,7 +1063,7 @@ write_volt_maps = False
       })
 
 
-      ## PLOTS ----------------------------
+      ## FOCAL SITE PLOTS ----------------------------
 
       ### climate space --------------------------------
       output$clim_plot <- renderPlot({
@@ -1095,6 +1145,8 @@ write_volt_maps = False
 
 
       ### distance space --------------------------------
+
+
       output$dist_plot <- renderPlot({
             req(site_analogs())
 
@@ -1167,6 +1219,181 @@ write_volt_maps = False
                   labs(y = NULL,
                        x = paste(input$fia_var, "(kernel-weighted mean across analogs)"))
       })
+
+
+
+      ## MODEL EVALUATION ----------------------------
+
+      model_eval <- reactiveValues(comparison = NULL,
+                                   scatter = NULL)
+
+
+      eval_var_set <- function(clim_vars, vary_bandwidths = TRUE){
+            r <- rast("data/clim_quantized.tif")
+            clim <- r[[paste0(clim_vars, 1)]] %>%
+                  crop(ext(c(input$bbox_x, input$bbox_y))) %>%
+                  aggregate(input$clim_agg, na.rm = TRUE)
+
+            po <- plot_occ()
+            xy <- po[, c("x", "y")]
+            clim_hst <- extract(clim, xy, ID = FALSE, method = "bilinear")
+            d <- cbind(xy, clim_hst)
+            values <- po[[var()]]
+
+            set.seed(123)
+            train <- sample(c(TRUE, FALSE), nrow(xy), replace = T)
+
+            aicc <- function(observed, predicted, k) {
+                  # note: k should be n_clim_vars + n_bandwidth_params
+                  n <- length(observed)
+                  sse <- sum((observed - predicted)^2)
+                  aic <- n * log(sse / n) + 2 * k # Basic AIC
+                  aicc <- aic + (2 * k^2 + 2 * k) / (n - k - 1) # Corrected AICc
+                  return(aicc)
+            }
+
+            eval <- function(theta_clim, theta_geog, x, index, values_train, values_test, summarize = TRUE){
+                  aim <- suppressWarnings(analogs::analog_impact(
+                        x = x,
+                        pool = index,
+                        max_clim = theta_clim * 3,
+                        max_geog = theta_geog * 3,
+                        stat = "weighted_mean",
+                        weight = "gaussian_joint",
+                        theta = c(theta_clim, theta_geog),
+                        values = values_train)) %>%
+                        rename(pred = weighted_mean) %>%
+                        mutate(obs = values_test) %>%
+                        na.omit()
+                  if(summarize){
+                        aim <- aim  %>%
+                              summarize(rsq = cor(pred, obs)^2,
+                                        rmse = sqrt(mean((obs - pred)^2)),
+                                        daicc = aicc(obs, pred, length(clim_vars) + 2)) %>%
+                              mutate(theta_clim = theta_clim,
+                                     theta_geog = theta_geog)
+                  }
+                  return(aim)
+            }
+
+            index <- build_analog_index(d[train,], coord_type = "lonlat", index_res = 8)
+
+            if(vary_bandwidths){
+                  mult <- c(.25, .5, 1, 2, 4)
+                  clim_mult <- if("clim" %in% input$eval_params) mult else 1
+                  geog_mult <- if("geog" %in% input$eval_params) mult else 1
+                  params <- tidyr::expand_grid(theta_clim = input$theta_clim * clim_mult,
+                                               theta_geog = input$theta_geog * geog_mult)
+
+                  e <- purrr::pmap(params, eval,
+                                   x = d[!train,], index = index,
+                                   values_train = values[train], values_test = values[!train]) %>%
+                        purrr::list_rbind() %>%
+                        mutate(daicc = daicc - min(daicc)) %>% # convert AIC to delta AIC
+                        tidyr::gather(stat, value, rsq, rmse, daicc) %>%
+                        mutate(clim_vars = paste(clim_vars, collapse = "_"))
+            }else{
+                  e <- eval(input$theta_clim, input$theta_geog,
+                            x = d[!train,], index = index,
+                            values_train = values[train], values_test = values[!train],
+                            summarize = FALSE)
+            }
+
+            return(e)
+      }
+
+      observeEvent(input$run_eval, {
+
+            if("vars" %in% input$eval_params){
+                  cv <- input$clim_vars
+                  n <- min(input$eval_n_vars[1], length(cv)):min(input$eval_n_vars[2], length(cv))
+                  v <- lapply(n, function(x) apply(combn(cv, x), 2, list))
+                  v <- unlist(unlist(v, recursive = F), recursive = F)
+            }else{
+                  v <- list(input$clim_vars)
+            }
+
+            e <- v %>% lapply(eval_var_set) %>% bind_rows()
+
+            model_eval$comparison <- e
+      })
+
+      observeEvent(input$optimal_params, {
+            req(model_eval$comparison)
+
+            metric <- switch(input$eval_stat,
+                             "RMSE" = "rmse",
+                             "R-squared" = "rsq",
+                             "delta AIC" = "daicc")
+
+            opt <- model_eval$comparison %>% ungroup() %>%
+                  filter(stat == metric) %>%
+                  mutate(value = ifelse(stat == "rsq", value, -value)) %>%
+                  filter(value == max(value))
+
+            updateSliderInput(session, "theta_geog", value = opt$theta_geog)
+            updateSliderInput(session, "theta_clim", value = opt$theta_clim)
+            updateSelectizeInput(session, "clim_vars", selected = unlist(strsplit(opt$clim_vars, "_")))
+      })
+
+      output$eval_heatmap <- renderPlot({
+            req(model_eval$comparison)
+
+            metric <- switch(input$eval_stat,
+                             "RMSE" = "rmse",
+                             "R-squared" = "rsq",
+                             "delta AIC" = "daicc")
+
+            opt <- if(metric == "rsq") 1 else -1
+
+            e <- model_eval$comparison %>% ungroup() %>%
+                  filter(stat == metric) %>%
+                  mutate(label = signif(value, 2),
+                         optimal = value * opt == max(value * opt),
+                         text_color = case_when(optimal ~ "red",
+                                                scales::rescale(value) < .5 ~ "white",
+                                                TRUE ~ "black"),
+                         clim_vars = gsub("_", " + ", clim_vars),
+                         n_vars = stringr::str_count(clim_vars, "\\+") + 1)
+
+            ggplot(e, aes(theta_geog, theta_clim, fill = value, label = label)) +
+                  facet_wrap(~clim_vars) +
+                  geom_tile() +
+                  geom_text(aes(color = I(text_color), fontface = "bold")) +
+                  scale_x_log10(breaks = unique(e$theta_geog)) +
+                  scale_y_log10(breaks = unique(e$theta_clim)) +
+                  scale_fill_viridis_c() +
+                  guides(fill = guide_colorbar(barwidth = 12)) +
+                  theme_bw() +
+                  theme(legend.position = "bottom") +
+                  labs(y = "climate bandwidth (z)",
+                       x = "geographic bandwidth (km)",
+                       fill = paste0(input$eval_stat, " (", input$fia_var, ")"))
+      })
+
+
+      eval_scatter_data <- reactive({
+            eval_var_set(input$clim_vars, vary_bandwidths = FALSE)
+      })
+
+      output$eval_scatter <- renderPlot({
+            e <- eval_scatter_data()
+            req(e)
+
+            ggplot(e, aes(obs, pred)) +
+                  geom_point() +
+                  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "dodgerblue") +
+                  geom_smooth(method = lm, se = F, color = "red") +
+                  annotate(geom = "point", color = "red", size = 4,
+                           x = mean(e$obs), y = mean(e$pred)) +
+                  scale_x_sqrt() +
+                  scale_y_sqrt() +
+                  coord_fixed() +
+                  theme_bw() +
+                  labs(x = paste0("observed ", input$fia_var),
+                       y = paste0("predicted ", input$fia_var))
+      })
+
 
       # DOWNLOADS --------------------------------------
       output$download_raster <- downloadHandler(
