@@ -1,3 +1,5 @@
+source("renv/activate.R")
+library(jsonlite)
 library(shiny)
 library(leaflet)
 library(ggplot2)
@@ -680,7 +682,7 @@ server <- function(input, output, session) {
             c(sources %>% setNames("sources"),
               destinations %>% setNames("destinations"))
       })
-      
+
       suitability <- reactive({
           suit <- sqrt(aim()$bsl[[var()]] * aim()$fut[[var()]])
           suit[is.na(suit)] <- 0
@@ -782,7 +784,7 @@ write_volt_maps = False
             curr_ground <- grounds %>% "*"(voltage) %>% setNames("current_ground")
             curr_dest <- electrodes()$destinations %>% "*"(voltage) %>% setNames("current_destinations")
             curr_loss <- leakage() %>% "*"(voltage) %>% setNames("current_loss")
-            
+
             # power dissipation (poinch points)
             curr_power <- (current^2 * resistance()$resistance) %>% setNames("current_power")
 
