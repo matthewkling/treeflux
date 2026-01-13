@@ -23,9 +23,11 @@ clim_bbox <- c(floor(clim_bbox[c(1, 3)] / bbox_res) * bbox_res, ceiling(clim_bbo
 spp <- sort(unique(read_csv("data/fia.csv")$species))
 
 julia_setup()
-julia_library("Circuitscape") # julia_install_package("Circiutscape")
-cs_stat_names <- c("current flow", "current on target", "current loss", "current direction", "conductance", "loss", "voltage")
-cs_stats <- c("current_flow", "current_detinations", "current_loss", "current_direction", "conductance", "loss", "voltage")
+julia_library("Circuitscape") # julia_install_package("Circuitscape")
+cs_stat_names <- c("current flow", "current on target", "current loss", "current pinch points",
+                   "current direction", "conductance", "loss", "voltage")
+cs_stats <- c("current_flow", "current_destinations", "current_loss", "current_power",
+              "current_direction", "conductance", "loss", "voltage")
 
 
 # HELPER FUNCTIONS ------------------------------------
@@ -678,14 +680,15 @@ server <- function(input, output, session) {
             c(sources %>% setNames("sources"),
               destinations %>% setNames("destinations"))
       })
+      
+      suitability <- reactive({
+          suit <- sqrt(aim()$bsl[[var()]] * aim()$fut[[var()]])
+          suit[is.na(suit)] <- 0
+          suit
+      })
 
       ### Resistance --------------
       resistance <- reactive({
-
-            if(grepl("suitability", input$cs_conductance_layer)){
-                  suitability <- sqrt(aim()$bsl[[var()]] * aim()$fut[[var()]])
-                  suitability[is.na(suitability)] <- 0
-            }
 
             if(grepl("wind", input$cs_conductance_layer)){
                   if(input$cs_sources == "grid cells"){
@@ -703,15 +706,13 @@ server <- function(input, output, session) {
                   conductance <- aligned_flux(bearing, wind())
                   # note: consider adding a minimum conductance to account for local diffusion
             } else if(input$cs_conductance_layer == "suitability") {
-                  conductance <- suitability
+                  conductance <- suitability()
             } else if(input$cs_conductance_layer == "suitability * wind") {
                   conductance <- aligned_flux(bearing, wind()) * suitability
             } else { # uniform conductance
                   # v <- 10^input$cs_conductance
                   conductance <- setValues(electrodes()$sources, 1)
             }
-
-
 
             mean_cond <- 10 ^ input$cs_conductance_scale
             conductance <- conductance / global(conductance, "mean", na.rm = T)$mean * mean_cond
@@ -740,6 +741,7 @@ server <- function(input, output, session) {
             grounds <- (electrodes()$destinations + leakage()) %>% setNames("grounds")
 
             # write rasters to disk as ASCII grids
+            if(!dir.exists("circuitscape")) dir.create("circuitscape")
             writeRaster(resistance()$resistance, "circuitscape/resistance.asc", overwrite = TRUE)
             writeRaster(electrodes()$sources, "circuitscape/sources.asc", overwrite = TRUE)
             writeRaster(grounds, "circuitscape/grounds.asc", overwrite = TRUE)
@@ -780,13 +782,16 @@ write_volt_maps = False
             curr_ground <- grounds %>% "*"(voltage) %>% setNames("current_ground")
             curr_dest <- electrodes()$destinations %>% "*"(voltage) %>% setNames("current_destinations")
             curr_loss <- leakage() %>% "*"(voltage) %>% setNames("current_loss")
+            
+            # power dissipation (poinch points)
+            curr_power <- (current^2 * resistance()$resistance) %>% setNames("current_power")
 
             curr_dir <- gradient_bearing(-voltage) %>% setNames("current_direction")
 
             # Clean temp files
             file.remove(list.files("circuitscape", full.names = T))
 
-            c(current, voltage, curr_dest, curr_loss,
+            c(current, voltage, curr_dest, curr_loss, curr_power,
               resistance()$conductance, leakage(), curr_dir) %>%
                   mask(aim()$bsl[[var()]])
       })
