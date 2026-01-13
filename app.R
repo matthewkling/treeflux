@@ -287,9 +287,9 @@ ui <- page_sidebar(
                         "Info",
                         p("This tool uses 'analog impact models' to interpolate FIA variables across
                           a spatial grid, based on geographic proximity and climatic similarity to
-                          FIA plots, optionally accounting for pedicted future climate.
-                          Use the tool to compare baseline and future surfaces to assess potential forest change,
-                          model connectivity between current and potential future distributions using Circuitscape,
+                          FIA plots, optionally accounting for pedicted future climate change.
+                          Use it to assess potential shifts in species distributions and other forest characteristics,
+                          model connectivity between current and potential future distributions,
                           and explore properties of plots that are analogs to your focal sites.",
                           style = "font-size: 14px; color: #555;")
                   ),
@@ -425,7 +425,7 @@ ui <- page_sidebar(
                                     ),
 
                                     plotOutput("eval_heatmap", height = "600px")
-                              ),
+                              )
                         )
 
                   ),
@@ -669,7 +669,7 @@ server <- function(input, output, session) {
                   v$z <- plot_occ()[[var()]]
                   v <- v[v$z > 0,]
                   v <- vect(v, geom = c("x", "y"))
-                  v <- rasterize(v, aim()$bsl[[var()]], field = "z")
+                  v <- rasterize(v, aim()$fut[[var()]], field = "z")
                   destinations <- v
             }
             destinations[is.na(destinations[])] <- 0
@@ -681,19 +681,38 @@ server <- function(input, output, session) {
 
       ### Resistance --------------
       resistance <- reactive({
+
+            if(grepl("suitability", input$cs_conductance_layer)){
+                  suitability <- sqrt(aim()$bsl[[var()]] * aim()$fut[[var()]])
+                  suitability[is.na(suitability)] <- 0
+            }
+
+            if(grepl("wind", input$cs_conductance_layer)){
+                  if(input$cs_sources == "grid cells"){
+                        bearing <- gradient_bearing(electrodes()$destinations)
+                  }else{
+                        # convert points to smooth surface for bearing computations
+                        bearing <- electrodes()$destinations
+                        bearing[bearing == 0] <- NA
+                        bearing <- distance(bearing)
+                        bearing <- gradient_bearing(-bearing)
+                  }
+            }
+
             if(input$cs_conductance_layer == "wind"){
-                  bearing <- gradient_bearing(electrodes()$destinations)
                   conductance <- aligned_flux(bearing, wind())
                   # note: consider adding a minimum conductance to account for local diffusion
             } else if(input$cs_conductance_layer == "suitability") {
-                  conductance <- sqrt(electrodes()$sources * electrodes()$destinations)
+                  conductance <- suitability
             } else if(input$cs_conductance_layer == "suitability * wind") {
-                  bearing <- gradient_bearing(electrodes()$destinations)
-                  conductance <- aligned_flux(bearing, wind()) * sqrt(electrodes()$sources * electrodes()$destinations)
+                  conductance <- aligned_flux(bearing, wind()) * suitability
             } else { # uniform conductance
                   # v <- 10^input$cs_conductance
                   conductance <- setValues(electrodes()$sources, 1)
             }
+
+
+
             mean_cond <- 10 ^ input$cs_conductance_scale
             conductance <- conductance / global(conductance, "mean", na.rm = T)$mean * mean_cond
             conductance <- setNames(conductance, "conductance")
@@ -759,7 +778,7 @@ write_volt_maps = False
                   setNames("current_flow")
             voltage <- setValues(current, voltage) %>% setNames("voltage")
             curr_ground <- grounds %>% "*"(voltage) %>% setNames("current_ground")
-            curr_dest <- electrodes()$destinations %>% "*"(voltage) %>% setNames("current_detinations")
+            curr_dest <- electrodes()$destinations %>% "*"(voltage) %>% setNames("current_destinations")
             curr_loss <- leakage() %>% "*"(voltage) %>% setNames("current_loss")
 
             curr_dir <- gradient_bearing(-voltage) %>% setNames("current_direction")
