@@ -1,6 +1,3 @@
-# Clear the library path so Julia uses its own bundled artifacts
-Sys.setenv(LD_LIBRARY_PATH = "")
-
 library(jsonlite)
 library(shiny)
 library(leaflet)
@@ -29,9 +26,9 @@ spp <- sort(unique(read_csv("data/fia.csv")$species))
 julia_setup()
 julia_library("Circuitscape") # julia_install_package("Circuitscape")
 cs_stat_names <- c("current flow", "current on target", "current loss", "current pinch points",
-                   "current direction", "conductance", "loss", "voltage")
+                   "current direction", "voltage", "conductance", "loss")
 cs_stats <- c("current_flow", "current_destinations", "current_loss", "current_power",
-              "current_direction", "conductance", "loss", "voltage")
+              "current_direction", "voltage", "conductance", "loss")
 
 theme_set(theme_bw(base_size = 16))
 
@@ -94,31 +91,19 @@ clim_circle <- function(pt, radius, means, sds) {
 }
 
 
-gradient_bearing <- function(target){
-      # Define Sobel Kernels
-      # Gx: Detects change along the X-axis (West-East)
+gradient_bearing <- function(target) {
       sobel_x <- matrix(c(-1, 0, 1,
                           -2, 0, 2,
                           -1, 0, 1), nrow=3, byrow=TRUE)
 
-      # Gy: Detects change along the Y-axis (South-North)
       sobel_y <- matrix(c( 1,  2,  1,
                            0,  0,  0,
                            -1, -2, -1), nrow=3, byrow=TRUE)
 
-      # Calculate Gradients
-      # We use focal with our custom matrices
       gx <- focal(target, w = sobel_x)
       gy <- focal(target, w = sobel_y)
 
-      # Calculate the Target Bearing (in radians)
-      # atan2(y, x) gives the angle from the positive x-axis
-      target_bearing_rad <- atan2(gy, gx)
-
-      # Convert to degrees (0 to 360) for comparison with wind
-      target_bearing_deg <- (target_bearing_rad * 180 / pi + 360) %% 360
-
-      return(target_bearing_deg)
+      (atan2(gy, gx) * 180 / pi + 360) %% 360
 }
 
 
@@ -273,23 +258,29 @@ ui <- page_sidebar(
 ")),
 
       tags$head(
-            tags$style(HTML("
-    /* Make the tooltip wider */
-    .tooltip-inner {
-      max-width: 350px !important;
-      text-align: left;
-      text-transform: none !important; /* Stop the ALL CAPS */
-      line-height: 1.2 !important;     /* Tighten line spacing */
-      padding: 8px 12px;
-      font-size: 0.85rem;
-    }
+            tags$style(HTML(
+                        "/* Make the tooltip wider */
+                    .tooltip-inner {
+                        max-width: 350px !important;
+                        text-align: left;
+                        text-transform: none !important;
+                        line-height: 1.2 !important;
+                        padding: 8px 12px;
+                        font-size: 0.85rem;
+                    }
 
-    /* Optional: style the info icon to be subtle */
-    .info-icon {
-      color: #6c757d;
-      margin-left: 4px;
-      cursor: help;
-    }
+                    /* Subtle styling for definition list descriptions */
+                    .tooltip-inner dd {
+                        color: #aaa;
+                        margin-left: 0;
+                        margin-bottom: 0.5em;
+                    }
+
+                    /* Optional: make terms stand out more */
+                    .tooltip-inner dt {
+                        color: #fff;
+                        font-weight: 600;
+                    }
   "))
       ),
 
@@ -344,15 +335,15 @@ ui <- page_sidebar(
                   accordion_panel(
                         "Climate data",
                         selectInput("clim_vars", "Climate variables", clim_vars(), selected = c("cwd", "aet"), multiple = TRUE) %>%
-                              tooltip(HTML("Choose one or more variables for measuring multivariate climate similarity:<br>
-                              <ul>
-                                    <li> CWD = climatic water deficit</li>
-                                    <li> AET = actual evapotranspiration</li>
-                                    <li> PPT = log total annual precipitation</li>
-                                    <li> TMEAN = mean annual temperature</li>
-                                    <li> TMINCM = avg min temp of coldest month</li>
-                                    <li> TMAXWM = avg max temp of warmest month</li>
-                              </ul> ")),
+                              tooltip(HTML("Choose one or more variables for measuring multivariate climate similarity:<br><br>
+                                          <dl style='margin:0;'>
+                                              <dt>CWD</dt> <dd>Climatic water deficit</dd>
+                                              <dt>AET</dt> <dd>Actual evapotranspiration</dd>
+                                              <dt>PPT</dt> <dd>Total annual precipitation (log-transformed)</dd>
+                                              <dt>TMEAN</dt> <dd>Mean annual temperature</dd>
+                                              <dt>TMINCM</dt> <dd>Avg min temp of coldest month</dd>
+                                              <dt>TMAXWM</dt> <dd>Avg max temp of warmest month</dd>
+                                          </dl>")),
                         sliderInput("clim_agg", "Raster grain size", 1, 10, value = 10, step = 1, post = " km") %>%
                               tooltip("Select the resolution of the modeling grid; larger values are faster but less precise.")
                   ),
@@ -364,7 +355,7 @@ ui <- page_sidebar(
                                  are considered non-analog and excluded."), hr(),
                         sliderInput("theta_geog", "Geographic bandwidth (km)", 5, 100, value = 30),
                         sliderInput("theta_clim", "Climate bandwidth (z)", .05, .5, value = .1) %>%
-                              tooltip("Climate bandwidth units are in standard deviations relative to climate variation across all FIA plots")
+                              tooltip("Climate bandwidth units are in standard deviations relative to climate variation across all FIA plots in the contiguous US")
                   ),
 
                   accordion_panel(
@@ -374,22 +365,47 @@ ui <- page_sidebar(
                                     c("presence probability", "proportion basal area", "total basal area", "total basal area ALL species")) %>%
                               tooltip("Choose which focal variable gets interpolated and predicted."),
                         selectInput("summary_stat", "Summary statistic", c("weighted mean", "weighted sum")) %>%
-                              tooltip("Statistic used to summarize values across analog FIA plots. Weights are based on the combination of climatic similarity
-                                      and geographic proximity. `Weighted mean` is a weighted average of values across analogs, and could be high even if analogs are few and distant.
-                                      `Weighted sum` is the summation of weights time values, and increases with plots' proximity and similarity as well as their mean values."),
-                        selectInput("stat", "Raster variable", c("FIA variable", "Effective sample size" = "ESS", cs_stat_names)) %>%
-                              tooltip("Select which variable to display on the map."),
+                              tooltip(HTML("Statistic used to summarize values across analog FIA plots. Weights are based on the combination of climatic similarity
+                                      and geographic proximity.
+                                      <ul>
+                                          <li> `Weighted mean` is a weighted average of values across analogs,
+                                                and could be high even if analogs are few and distant.</li>
+                                          <li> `Weighted sum` is the summation of weights time values, and
+                                                increases with plots' proximity and similarity as well as their mean values.</li>
+                                      </ul>")),
+                        selectInput("stat", "Raster variable", c("FIA variable", "effective sample size" = "ESS", cs_stat_names)) %>%
+                              tooltip(HTML("<dl style='margin:0;'>
+                                              <dt>FIA variable</dt> <dd>Interpolated values for the plot variable selected above</dd>
+                                              <dt>Effective sample size</dt> <dd>Effective number of FIA plots within climatic and geographic range, accounting for weights</dd>
+                                              <dt>Current flow</dt> <dd>Total current passing through each cell; high values indicate important movement corridors</dd>
+                                              <dt>Current on target</dt> <dd>Current delivered to destination grounds; shows where dispersers successfully reach future-suitable habitat</dd>
+                                              <dt>Current loss</dt> <dd>Current lost to non-target grounds; represents dispersers removed via mortality or settlement before reaching destinations</dd>
+                                              <dt>Current pinch points</dt> <dd>Power dissipation (I²R); highlights bottlenecks where connectivity is both concentrated and tenuous — priorities for restoration or protection</dd>
+                                              <dt>Current direction</dt> <dd>Bearing of net current flow through each cell</dd>
+                                              <dt>Voltage</dt> <dd>How connected each cell is to source populations; high values indicate greater accessibility for dispersers</dd>
+                                              <dt>Conductance</dt> <dd>Model input: ease of movement across the landscape (inverse of resistance)</dd>
+                                              <dt>Loss</dt> <dd>Model input: rate at which dispersers are removed from the migrating pool at each cell</dd>
+                                          </dl>")),
                         selectInput("time", "Raster variable timeframe", c("historic", "future", "delta")) %>%
                               tooltip("Choose whether to display historic or future model predictions, or their difference.
                                       Only relevant for `FIA varibale` and `ESS` raster variables."),
                         selectInput("vector", "Vector layer",
                                     c("occupied FIA plots", "all FIA plots", "focal site analogs", "current animation", "current field", "none")) %>%
-                              tooltip("Select which point or line layer is displayed.")
+                              tooltip("Select which point or line layer is displayed.") %>%
+                              tooltip(HTML("Select which point or line layer is displayed:<br><br>
+                                          <dl style='margin:0;'>
+                                              <dt>Occupied FIA plots</dt> <dd>Plots where the selected species was recorded</dd>
+                                              <dt>All FIA plots</dt> <dd>All plots including non-forested plots not surveyed</dd>
+                                              <dt>Focal site analogs</dt> <dd>Plots within climatic and geographic range of the selected site</dd>
+                                              <dt>Current animation</dt> <dd>Animation with particle movement showing direction and magnitude of mean current flow</dd>
+                                              <dt>Current field</dt> <dd>Vector field showing showing direction and magnitude of mean current flow</dd>
+                                          </dl>"))
                   ),
 
                   accordion_panel(
                         "Cartography",
-                        sliderInput("vector_scale", "Point/line size", -1, 1, 0, step = .1),
+                        sliderInput("vector_scale", "Point/line size", -1, 1, 0, step = .1) %>%
+                              tooltip("Use this slider to adjust the size of FIA plot markers, or the length of current lines"),
                         sliderInput("rast_opacity", "Raster opacity", 0, 1, .8, step = .01),
                         selectInput("rast_transform", "Raster value transformation",
                                     choices = c("identity", "log10", "sqrt", "uniform"))
@@ -860,9 +876,8 @@ write_volt_maps = False
             curr_dest <- electrodes()$destinations %>% "*"(voltage) %>% setNames("current_destinations")
             curr_loss <- leakage() %>% "*"(voltage) %>% setNames("current_loss")
 
-            # power dissipation (poinch points)
+            # power dissipation (pinch points)
             curr_power <- (current^2 * resistance()$resistance) %>% setNames("current_power")
-
             curr_dir <- gradient_bearing(-voltage) %>% setNames("current_direction")
 
             # Clean temp files
@@ -972,6 +987,7 @@ write_volt_maps = False
                   removeControl("raster_legend")
 
             ## palettes ##
+            proj_method <- "bilinear"
             mm <- minmax(r)
             dom <- if(input$rast_transform == "identity") c(0, mm[2]) else mm
             if(input$time == "delta" && input$stat == "FIA variable" |
@@ -1001,9 +1017,10 @@ write_volt_maps = False
                         na.color = "transparent"
                   )
             } else if(input$stat == "current direction") {
+                  proj_method <- "ngb" # because bilinear interpolation breaks for a circular variable
                   dom <- if(input$rast_transform == "identity") c(0, 360) else mm
                   rast_pal <- colorNumeric(
-                        palette = rainbow(10),
+                        palette = rainbow(20)[c(1:20, 1)],
                         domain = dom,
                         na.color = "transparent"
                   )
@@ -1036,6 +1053,7 @@ write_volt_maps = False
                         r,
                         colors  = rast_pal,
                         opacity = input$rast_opacity,
+                        method = proj_method,
                         group = "AIM results"
                   ) %>%
                   addLegend(
@@ -1329,46 +1347,6 @@ write_volt_maps = False
                   labs(x = "analog type",
                        fill = lab,
                        size = lab)
-
-
-            # #############
-            #
-            # d <- switch(input$analog_direction,
-            #             "Reverse analogs" = site_analogs()$rev_analogs,
-            #             "Forward analogs" = site_analogs()$fwd_analogs,
-            #             "Contemporary analogs" = site_analogs()$bsl_analogs)
-            #
-            # analogs <- plot_occ()[d$analog_index, ] %>%
-            #       select(x, y) %>%
-            #       bind_cols(select(d, clim_dist, geog_dist)) %>%
-            #       mutate(weight = dnorm(clim_dist, sd = input$theta_clim) * dnorm(geog_dist, sd = input$theta_geog)) %>%
-            #       left_join(fia_plots_species_all(), by = join_by(x, y))
-            #
-            # a <- analogs %>%
-            #       select(x, y, weight, species) %>%
-            #       tidyr::expand(tidyr::nesting(x, y, weight), species) %>%
-            #       left_join(analogs, by = join_by(x, y, weight, species)) %>%
-            #       mutate(basal_area = ifelse(is.na(basal_area), 0, basal_area)) %>%
-            #       group_by(x, y) %>%
-            #       mutate(baplot = sum(basal_area),
-            #              baprop = basal_area / sum(basal_area),
-            #              baprop = ifelse(is.finite(baprop), baprop, 0)) %>%
-            #       group_by(species) %>%
-            #       summarize(
-            #             pres = weighted.mean(basal_area > 0, weight),
-            #             batot = weighted.mean(basal_area, weight),
-            #             baprop = weighted.mean(baprop, weight),
-            #             baplot = weighted.mean(baplot, weight)
-            #       ) %>%
-            #       filter(!is.na(species))
-            #
-            # a$value <- a[[var()]]
-            #
-            # ggplot(a, aes(value, species)) +
-            #       geom_bar(stat = "identity", fill = green) +
-            #       scale_x_continuous(limits = c(0, max(a$value) * 1.1), expand = c(0, 0)) +
-            #       labs(y = NULL,
-            #            x = paste(input$fia_var, "(kernel-weighted mean across analogs)"))
       })
 
 
