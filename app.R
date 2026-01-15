@@ -18,7 +18,7 @@ library(JuliaCall)
 
 clim_vars <- function() c("tmean", "ppt", "aet", "cwd", "tmincm", "tmaxwm")
 bbox_res <- 1
-clim_bbox <- as.vector(ext(clim_rast <- rast("data/clim_quantized.tif")))
+clim_bbox <- as.vector(ext(rast("data/clim_quantized.tif")))
 clim_bbox <- c(floor(clim_bbox[c(1, 3)] / bbox_res) * bbox_res, ceiling(clim_bbox[c(2, 4)] / bbox_res) * bbox_res)
 
 spp <- sort(unique(read_csv("data/fia.csv")$species))
@@ -370,14 +370,14 @@ ui <- page_sidebar(
                                             <dt>Weighted mean</dt>
                                             <dd>Expected conditions given climate and location. Can be high even when analogs are few and distant.</dd>
                                             <dt>Weighted sum</dt>
-                                            <dd>Propagule pressure potential: suitability weighted by accessibility to currently-occupied analog plots.
-                                                Deltas reflect how climate change reshuffles analog relationships — positive values indicate
-                                                increasing connectivity to current source populations.</dd>
+                                            <dd>Propagule pressure potential: suitability weighted by accessibility to currently-occupied analog plots.</dd>
                                         </dl>")),
-                        selectInput("stat", "Raster variable", c("FIA variable", "effective sample size" = "ESS", cs_stat_names)) %>%
+                        selectInput("stat", "Raster variable", c("FIA variable", "effective sample size" = "ESS",
+                                                                 "focal site similarity", cs_stat_names)) %>%
                               tooltip(HTML("<dl style='margin:0;'>
                                               <dt>FIA variable</dt> <dd>Interpolated values for the plot variable selected above</dd>
                                               <dt>Effective sample size</dt> <dd>Effective number of FIA plots within climatic and geographic range, accounting for weights</dd>
+                                              <dt>Focal site similarity</dt> <dd>Climatic distance to the site selected on map, based on the selected analog direction</dd>
                                               <dt>Current flow</dt> <dd>Total current passing through each cell; high values indicate important movement corridors</dd>
                                               <dt>Current on target</dt> <dd>Current delivered to destination grounds; shows where dispersers successfully reach future-suitable habitat</dd>
                                               <dt>Current loss</dt> <dd>Current lost to non-target grounds; represents dispersers removed via mortality or settlement before reaching destinations</dd>
@@ -408,8 +408,14 @@ ui <- page_sidebar(
                         sliderInput("vector_scale", "Point/line size", -1, 1, 0, step = .1) %>%
                               tooltip("Use this slider to adjust the size of FIA plot markers, or the length of current lines"),
                         sliderInput("rast_opacity", "Raster opacity", 0, 1, .8, step = .01),
-                        selectInput("rast_transform", "Raster value transformation",
-                                    choices = c("identity", "log10", "sqrt", "uniform"))
+                        selectInput("rast_transform", "Scale transformation",
+                                    choices = c("identity", "log10", "sqrt", "uniform")) %>%
+                              tooltip("Choose transformation used to visualize raster values. Legend will display transformed values."),
+                        selectInput("rast_palette", "Color palette",
+                                    choices = c("default", "viridis", "magma", "plasma", "inferno",
+                                                "RdYlBu", "Spectral", "RdBu", "BrBG"),
+                                    selected = "default") %>%
+                              tooltip("Override the default palette for the current raster variable")
                   ),
 
                   accordion_panel(
@@ -447,7 +453,7 @@ ui <- page_sidebar(
                                     "Focal site analogs",
                                     helpText(
                                           "This module lets you explore climate analogs for individual sites of interest.
-                                          It does not influence the model results shown on the map.
+                                          It does not influence the model results shown on the map except for the 'Focal site similarity' raster variable.
                                           Click the map to select a site; the plots below display properties of FIA plots that are both geographically close and climatically similar to your site.
                                           Purple reference lines illustrate bandwidths (dashed) and hard cutoffs (3x bandwidth) for geographic and climatic distances."), hr(),
                                     layout_column_wrap(
@@ -945,6 +951,28 @@ write_volt_maps = False
             }
       })
 
+      site_diff <- reactive({
+            # returns raster layer of euclidean climatic distance to focal site
+
+            req(site$x, site$y)
+
+            s <- switch(input$analog_direction,
+                        "Contemporary analogs" = site_analogs()$hst_site,
+                        "Reverse analogs" = site_analogs()$fut_site,
+                        "Forward analogs" = site_analogs()$hst_site)
+
+            r <- switch(input$analog_direction,
+                        "Contemporary analogs" = clim()$hst,
+                        "Reverse analogs" = clim()$hst,
+                        "Forward analogs" = clim()$fut)
+
+            names(s) <- gsub("1|2", "", names(s))
+            names(r) <- gsub("1|2", "", names(r))
+            for(i in names(r)) r[[i]] <- abs(r[[i]] - s[[i]]) ^ 2
+            r <- sqrt(app(r, sum))
+            return(r)
+      })
+
 
       ### Raster -------------------------------
       display_layer <- reactive({
@@ -958,6 +986,8 @@ write_volt_maps = False
             }else if(input$stat %in% c("current animation", "current field")){
                   # show FIA delta raster for these layers
                   r <- aim()$fut[[var()]] - aim()$bsl[[var()]]
+            }else if(input$stat == "focal site similarity"){
+                  r <- site_diff()
             }else if(input$stat %in% cs_stat_names){
                   st <- cs_stats[cs_stat_names == input$stat]
                   r <- connectivity()[[st]]
@@ -991,6 +1021,9 @@ write_volt_maps = False
             proj_method <- "bilinear"
             mm <- minmax(r)
             dom <- if(input$rast_transform == "identity") c(0, mm[2]) else mm
+
+            choose_palette <- function(x) if(input$rast_palette == "default") x else input$rast_palette
+
             if(input$time == "delta" && input$stat == "FIA variable" |
                input$stat %in% c("current animation", "current field")){
                   # units are deltas
@@ -999,21 +1032,21 @@ write_volt_maps = False
                   mm <- minmax(r)
                   dom <- max(abs(mm)) * c(-1, 1)
                   rast_pal <- colorNumeric(
-                        palette = c("darkred", "orange", "gray90", "dodgerblue", "darkblue"),
+                        palette = c("darkred", "orange", "gray90", "dodgerblue", "darkblue") %>% choose_palette(),
                         domain = dom,
                         na.color = "transparent"
                   )
             } else if(input$stat == "ESS"){
                   # units are sample sizes
                   rast_pal <- colorNumeric(
-                        palette = c("gray90", "darkblue"),
+                        palette = c("gray90", "darkblue") %>% choose_palette(),
                         domain = dom,
                         na.color = "transparent"
                   )
             } else if(input$stat == "FIA variable") {
                   # historic or future estimate: domain is unit except for total BA
                   rast_pal <- colorNumeric(
-                        palette = c("gray90", green),
+                        palette = c("gray90", green) %>% choose_palette(),
                         domain = dom,
                         na.color = "transparent"
                   )
@@ -1025,10 +1058,16 @@ write_volt_maps = False
                         domain = dom,
                         na.color = "transparent"
                   )
-            } else {
-                  # other connectivity variable
+            } else if(input$stat == "focal site similarity") {
                   rast_pal <- colorNumeric(
-                        palette = c("gray90", "darkorchid4"),
+                        palette = c("gray90", "darkorchid4") %>% choose_palette(),
+                        domain = dom,
+                        na.color = "transparent",
+                        reverse = TRUE
+                  )
+            } else {
+                  rast_pal <- colorNumeric(
+                        palette = c("gray90", "darkorchid4") %>% choose_palette(),
                         domain = dom,
                         na.color = "transparent"
                   )
@@ -1046,6 +1085,9 @@ write_volt_maps = False
                   }
                   if(input$stat %in% cs_stat_names){
                         title <- paste0(title, " --<br/>", input$stat)
+                  }
+                  if(input$stat == "focal site similarity"){
+                        title <- paste0(gsub(" analogs", "", input$analog_direction), "<br>climate distance<br>from focal site")
                   }
             }
 
