@@ -1,4 +1,6 @@
-source("renv/activate.R")
+# Clear the library path so Julia uses its own bundled artifacts
+Sys.setenv(LD_LIBRARY_PATH = "")
+
 library(jsonlite)
 library(shiny)
 library(leaflet)
@@ -30,6 +32,8 @@ cs_stat_names <- c("current flow", "current on target", "current loss", "current
                    "current direction", "conductance", "loss", "voltage")
 cs_stats <- c("current_flow", "current_destinations", "current_loss", "current_power",
               "current_direction", "conductance", "loss", "voltage")
+
+theme_set(theme_bw(base_size = 16))
 
 
 # HELPER FUNCTIONS ------------------------------------
@@ -246,6 +250,7 @@ make_spokes <- function(mag, dir, subsample = 10, arrow_scale = 0.5) {
       )
 }
 
+tooltip <- function(x, ...) bslib::tooltip(x, ...)
 
 
 # UI ---------------------------------------------------
@@ -266,6 +271,27 @@ ui <- page_sidebar(
     padding: 0 !important;
   }
 ")),
+
+      tags$head(
+            tags$style(HTML("
+    /* Make the tooltip wider */
+    .tooltip-inner {
+      max-width: 350px !important;
+      text-align: left;
+      text-transform: none !important; /* Stop the ALL CAPS */
+      line-height: 1.2 !important;     /* Tighten line spacing */
+      padding: 8px 12px;
+      font-size: 0.85rem;
+    }
+
+    /* Optional: style the info icon to be subtle */
+    .info-icon {
+      color: #6c757d;
+      margin-left: 4px;
+      cursor: help;
+    }
+  "))
+      ),
 
       theme = bs_theme(version = 5, bootswatch = "sandstone"),
 
@@ -300,25 +326,35 @@ ui <- page_sidebar(
 
                   accordion_panel(
                         "Region & species",
-                        selectizeInput("species", "Focal species",
-                                       choices = spp,
-                                       selected = "Pinus edulis"),
-                        actionButton("species_domain", "Snap domain to species range"),
+                        selectizeInput("species", "Species", choices = spp, selected = "Pinus edulis") %>%
+                              tooltip("Select a focal species by scrolling or typing"),
                         sliderInput("bbox_x", "Longitude range",
                                     min = clim_bbox["xmin"], max = clim_bbox["xmax"],
                                     value = c(-116, -100)),
                         sliderInput("bbox_y", "Latitude range",
                                     min = clim_bbox["ymin"], max = clim_bbox["ymax"],
-                                    value = c(29, 43))
+                                    value = c(29, 43)),
+                        layout_column_wrap(
+                              width = 1/2,
+                              actionButton("species_domain", "Snap to species range"),
+                              actionButton("window_domain", "Snap to current view")
+                        )
                   ),
 
                   accordion_panel(
                         "Climate data",
-                        helpText("Climate variables"),
-                        selectInput("clim_vars", NULL, clim_vars(), selected = c("cwd", "aet"), multiple = TRUE),
-
-                        helpText("Raster grain size (precision vs. speed)"),
-                        sliderInput("clim_agg", NULL, 1, 10, value = 10, step = 1, post = " km")
+                        selectInput("clim_vars", "Climate variables", clim_vars(), selected = c("cwd", "aet"), multiple = TRUE) %>%
+                              tooltip(HTML("Choose one or more variables for measuring multivariate climate similarity:<br>
+                              <ul>
+                                    <li> CWD = climatic water deficit</li>
+                                    <li> AET = actual evapotranspiration</li>
+                                    <li> PPT = log total annual precipitation</li>
+                                    <li> TMEAN = mean annual temperature</li>
+                                    <li> TMINCM = avg min temp of coldest month</li>
+                                    <li> TMAXWM = avg max temp of warmest month</li>
+                              </ul> ")),
+                        sliderInput("clim_agg", "Raster grain size", 1, 10, value = 10, step = 1, post = " km") %>%
+                              tooltip("Select the resolution of the modeling grid; larger values are faster but less precise.")
                   ),
 
                   accordion_panel(
@@ -327,25 +363,41 @@ ui <- page_sidebar(
                                  Bandwidths specify the standard deviations of these kernels. Plots farther than 3 stdevs
                                  are considered non-analog and excluded."), hr(),
                         sliderInput("theta_geog", "Geographic bandwidth (km)", 5, 100, value = 30),
-                        sliderInput("theta_clim", "Climate bandwidth (z)", .05, .5, value = .1)
+                        sliderInput("theta_clim", "Climate bandwidth (z)", .05, .5, value = .1) %>%
+                              tooltip("Climate bandwidth units are in standard deviations relative to climate variation across all FIA plots")
                   ),
 
                   accordion_panel(
                         "Model outputs",
                         helpText("Choose results to display or export"), hr(),
-                        selectInput("fia_var", "FIA variable modeled",
-                                    c("presence probability", "proportion basal area", "total basal area", "total basal area ALL species")),
-                        selectInput("stat", "Raster variable mapped",
-                                    c("FIA variable", "ESS", cs_stat_names)),
-                        selectInput("time", "Raster variable timeframe",
-                                    c("baseline", "future", "delta")),
-                        selectInput("vector", "Vector element mapped",
-                                    c("occupied FIA plots", "all FIA plots", "focal site analogs", "current animation", "current field", "none"))
+                        selectInput("fia_var", "FIA variable",
+                                    c("presence probability", "proportion basal area", "total basal area", "total basal area ALL species")) %>%
+                              tooltip("Choose which focal variable gets interpolated and predicted."),
+                        selectInput("summary_stat", "Summary statistic", c("weighted mean", "weighted sum")) %>%
+                              tooltip("Statistic used to summarize values across analog FIA plots. Weights are based on the combination of climatic similarity
+                                      and geographic proximity. `Weighted mean` is a weighted average of values across analogs, and could be high even if analogs are few and distant.
+                                      `Weighted sum` is the summation of weights time values, and increases with plots' proximity and similarity as well as their mean values."),
+                        selectInput("stat", "Raster variable", c("FIA variable", "Effective sample size" = "ESS", cs_stat_names)) %>%
+                              tooltip("Select which variable to display on the map."),
+                        selectInput("time", "Raster variable timeframe", c("historic", "future", "delta")) %>%
+                              tooltip("Choose whether to display historic or future model predictions, or their difference.
+                                      Only relevant for `FIA varibale` and `ESS` raster variables."),
+                        selectInput("vector", "Vector layer",
+                                    c("occupied FIA plots", "all FIA plots", "focal site analogs", "current animation", "current field", "none")) %>%
+                              tooltip("Select which point or line layer is displayed.")
+                  ),
+
+                  accordion_panel(
+                        "Cartography",
+                        sliderInput("vector_scale", "Point/line size", -1, 1, 0, step = .1),
+                        sliderInput("rast_opacity", "Raster opacity", 0, 1, .8, step = .01),
+                        selectInput("rast_transform", "Raster value transformation",
+                                    choices = c("identity", "log10", "sqrt", "uniform"))
                   ),
 
                   accordion_panel(
                         "Export",
-                        helpText("Download the raster data displayed on the map as a .tif, or model settings as a .txt for reproducibility."), hr(),
+                        helpText("Download the raster data displayed on the map as a .tif, or the current model settings as a .txt for reproducibility."), hr(),
                         textInput("download_filename", "Filename (without extension)", "fia_aim_result"),
                         downloadButton("download_raster", "Download raster"),
                         br(),
@@ -378,13 +430,22 @@ ui <- page_sidebar(
                                     "Focal site analogs",
                                     helpText(
                                           "This module lets you explore climate analogs for individual sites of interest.
-                                          Click the map to select a site; the plots below display properties of FIA plots that are both geographically close, and climatically similar, to your site.
-                                          Purple reference lines illustrate bandwidths and hard cutoffs (3x bandwidth) for geographic and climatic distances."), hr(),
+                                          It does not influence the model results shown on the map.
+                                          Click the map to select a site; the plots below display properties of FIA plots that are both geographically close and climatically similar to your site.
+                                          Purple reference lines illustrate bandwidths (dashed) and hard cutoffs (3x bandwidth) for geographic and climatic distances."), hr(),
                                     layout_column_wrap(
                                           width = 1/2,
-                                          selectInput("analog_direction", NULL, c("Contemporary analogs", "Reverse analogs", "Forward analogs")),
+                                          selectInput("analog_direction", NULL, c("Contemporary analogs", "Reverse analogs", "Forward analogs")) %>%
+                                                tooltip(HTML("Choose which type of analog to visualize:
+                                                <ul>
+                                                    <li>Contemporary analogs have historic climates similar to the focal site's historic climate.</li>
+                                                    <li>Reverse (inbound) analogs have historic climates similar to the focal site's future climate.</li>
+                                                    <li>Forward (outbound) analogs have future climates similar to the focal site's historic climate.</li>
+                                                </ul>")),
                                           actionButton("highlight_site", "Highlight on map"),
-                                          input_switch("filter_clim", "Exclude non-analog plots", TRUE)
+                                          input_switch("filter_clim", "Exclude non-analog plots", TRUE) %>%
+                                                tooltip("Whether to include sites that are more than 3 climate bandwidths away from the focal site.
+                                                        Sites more than 3 geographic bandwidths away are never shown.")
                                     ),
 
                                     plotOutput("clim_plot"),
@@ -394,16 +455,29 @@ ui <- page_sidebar(
 
                               accordion_panel(
                                     "Connectivity",
-                                    helpText("This tool models circuit-based landscape connectivity between baseline (source) and future (target) FIA surfaces."), hr(),
+                                    helpText("This tool models circuit-based landscape connectivity between historic (source) and future (target) FIA surfaces."), hr(),
 
                                     layout_column_wrap(
                                           width = 1/2,
-                                          selectInput("cs_sources", "Origin electrodes (sources)", c("grid cells", "FIA plots", "selected site")),
-                                          selectInput("cs_targets", "Destination electrodes (target grounds)", c("grid cells", "FIA plots", "selected site")),
-                                          selectInput("cs_conductance_layer", "Horizontal conductance", c("suitability", "wind", "suitability * wind", "uniform")),
-                                          selectInput("cs_loss_layer", "Loss (non-target grounds)", c("none", "uniform", "mean suitability", "max suitability")),
-                                          sliderInput("cs_conductance_scale", "log10 conductance scale", -2, 2, value = 0, step = .1),
-                                          sliderInput("cs_loss_scale", "log10 loss scale", -2, 2, value = -1, step = .1)
+                                          selectInput("cs_sources", "Origin electrodes (sources)", c("grid cells", "FIA plots", "selected site")) %>%
+                                                tooltip("Sites where current is injected. If `grid cells` or `FIA plots` is selected, current is injected
+                                                        in proportion to modeled or observed (respectively) values of the selected FIA variable.
+                                                        If `selected site` is chosen, current is injected only at the focal site."),
+                                          selectInput("cs_targets", "Destination electrodes (target grounds)", c("grid cells", "FIA plots", "selected site")) %>%
+                                                tooltip("Grounding sites that 'pull' current and allow it to exit the circuit.
+                                                        If `grid cells` or `FIA plots` is selected, ground conductance is proportional to modeled values
+                                                        of the selected FIA variable. If `selected site` is chosen, the focal site."),
+                                          selectInput("cs_conductance_layer", "Horizontal conductance", c("suitability", "wind", "suitability * wind", "uniform")) %>%
+                                                tooltip("The inverse of landscape resistance, horizontal conductance determines how easily current can flow across a site.
+                                                        `Suitability` models conductance proportional to the mean of historic and future FIA raster values.
+                                                        `Wind` models conductance proportional to the frequency and speed with which wind blows toward targets."),
+                                          selectInput("cs_loss_layer", "Loss (non-target grounds)", c("none", "uniform", "suitability" = "mean suitability")) %>%
+                                                tooltip("Choose whether and how to model current 'leakage' representing dispersers that are removed from the pool
+                                                        (via mortality or permanent settlement) before reaching target grounds."),
+                                          sliderInput("cs_conductance_scale", "log10 conductance scale", -2, 2, value = 0, step = .1) %>%
+                                                tooltip("Relative strength of horizontal conductance, compared to source, target, and loss components."),
+                                          sliderInput("cs_loss_scale", "log10 loss scale", -3, 2, value = -1, step = .1) %>%
+                                                tooltip("Relative strength of loss conductance, compared to source, target, and horizontal components.")
                                     )
                               ),
 
@@ -447,7 +521,8 @@ ui <- page_sidebar(
 # SERVER ---------------------------------------------------
 server <- function(input, output, session) {
 
-      point_radius <- 1000
+      point_radius <- reactive({10^input$vector_scale * 1000})
+
       green <- "darkgreen"
 
       var <- reactive({
@@ -512,17 +587,15 @@ server <- function(input, output, session) {
                             xmax = ceiling(max(x)) + pad,
                             ymin = floor(min(y)) - pad,
                             ymax = ceiling(max(y)) + pad)
+            updateSelectInput(session, "bbox_x", selected = c(bb$xmin, bb$xmax))
+            updateSelectInput(session, "bbox_y", selected = c(bb$ymin, bb$ymax))
+      })
 
-            updateSelectInput(
-                  session,
-                  "bbox_x",
-                  selected = c(bb$xmin, bb$xmax)
-            )
-            updateSelectInput(
-                  session,
-                  "bbox_y",
-                  selected = c(bb$ymin, bb$ymax)
-            )
+      ## Snap domain to current map view
+      observeEvent(input$window_domain, {
+            bb <- input$map_bounds
+            updateSelectInput(session, "bbox_x", selected = c(bb$west, bb$east))
+            updateSelectInput(session, "bbox_y", selected = c(bb$south, bb$north))
       })
 
       # for circuitscape rasters, time period must be "delta"
@@ -577,13 +650,15 @@ server <- function(input, output, session) {
       ### full raster -----------------------
       aim <- reactive({
 
+            stat <- gsub(" ", "_", input$summary_stat)
+
             aim_query <- function(x){
                   suppressWarnings(analogs::analog_impact(
                         x = x,
                         pool = pool()$index_hst,
                         max_clim = input$theta_clim * 3,
                         max_geog = input$theta_geog * 3,
-                        stat = c("count", "sum_weights", "weighted_mean", "ess"),
+                        stat = c("count", "sum_weights", stat, "ess"),
                         weight = "gaussian_joint",
                         theta = c(input$theta_clim, input$theta_geog),
                         values = pool()$values))
@@ -591,7 +666,7 @@ server <- function(input, output, session) {
 
             aim_bsl <- aim_query(clim()$hst)
             aim_fut <- aim_query(clim()$fut)
-            names(aim_bsl) <- names(aim_fut) <- gsub("weighted_mean_", "", names(aim_fut))
+            names(aim_bsl) <- names(aim_fut) <- gsub("weighted_mean_|weighted_sum_", "", names(aim_fut))
 
             list(fut = aim_fut,
                  bsl = aim_bsl)
@@ -684,9 +759,9 @@ server <- function(input, output, session) {
       })
 
       suitability <- reactive({
-          suit <- sqrt(aim()$bsl[[var()]] * aim()$fut[[var()]])
-          suit[is.na(suit)] <- 0
-          suit
+            suit <- sqrt(aim()$bsl[[var()]] * aim()$fut[[var()]])
+            suit[is.na(suit)] <- 0
+            suit
       })
 
       ### Resistance --------------
@@ -818,12 +893,6 @@ write_volt_maps = False
                             lng2 = max(fia_plots()$x),
                             lat2 = max(fia_plots()$y)) %>%
 
-                  # add opacity slider
-                  addControl(
-                        sliderInput("rast_opacity", "Raster opacity", 0, 1, value = .8, step = .01, width = "150px"),
-                        position = "bottomright"
-                  ) %>%
-
                   addScaleBar(
                         position = "bottomleft",
                         options = scaleBarOptions(
@@ -868,7 +937,7 @@ write_volt_maps = False
             if(input$stat == "ESS"){
                   r <- switch(input$time,
                               "delta" = 2 / (1/aim()$fut$ess + 1/aim()$bsl$ess), # harmonic mean
-                              "baseline" = aim()$bsl$ess,
+                              "historic" = aim()$bsl$ess,
                               "future" = aim()$fut$ess)
             }else if(input$stat %in% c("current animation", "current field")){
                   # show FIA delta raster for these layers
@@ -879,7 +948,7 @@ write_volt_maps = False
             }else{ # input$stat == "FIA variable"
                   r <- switch(input$time,
                               "delta" = aim()$fut[[var()]] - aim()$bsl[[var()]],
-                              "baseline" = aim()$bsl[[var()]],
+                              "historic" = aim()$bsl[[var()]],
                               "future" = aim()$fut[[var()]])
             }
 
@@ -887,17 +956,30 @@ write_volt_maps = False
       })
 
       observe({
-            req(display_layer())
+            r <- display_layer()
+            req(r)
+
+            trans <- switch(input$rast_transform,
+                            "identity" = identity,
+                            "log10" = log10,
+                            "sqrt" = sqrt,
+                            "uniform" = function(x) scales::rescale(rank(x, na.last = "keep")))
+            r <- setValues(r, trans(r[]))
+            r[!is.finite(r[])] <- NA
 
             proxy <- leafletProxy("map") %>%
                   clearImages() %>%
                   removeControl("raster_legend")
 
             ## palettes ##
-            mm <- minmax(display_layer())
+            mm <- minmax(r)
+            dom <- if(input$rast_transform == "identity") c(0, mm[2]) else mm
             if(input$time == "delta" && input$stat == "FIA variable" |
                input$stat %in% c("current animation", "current field")){
                   # units are deltas
+                  r <- display_layer()
+                  r[is.na(r[])] <- 0 # fill non-analog NAs
+                  mm <- minmax(r)
                   dom <- max(abs(mm)) * c(-1, 1)
                   rast_pal <- colorNumeric(
                         palette = c("darkred", "orange", "gray90", "dodgerblue", "darkblue"),
@@ -906,23 +988,20 @@ write_volt_maps = False
                   )
             } else if(input$stat == "ESS"){
                   # units are sample sizes
-                  dom <- c(0, mm[2])
                   rast_pal <- colorNumeric(
                         palette = c("gray90", "darkblue"),
                         domain = dom,
                         na.color = "transparent"
                   )
             } else if(input$stat == "FIA variable") {
-                  # baseline or future estimate: domain is unit except for total BA
-                  # dom <- if(var() %in% c("batot", "baplot")) c(0, mm[2]) else 0:1
-                  dom <- c(0, mm[2])
+                  # historic or future estimate: domain is unit except for total BA
                   rast_pal <- colorNumeric(
                         palette = c("gray90", green),
                         domain = dom,
                         na.color = "transparent"
                   )
             } else if(input$stat == "current direction") {
-                  dom <- c(0, 360)
+                  dom <- if(input$rast_transform == "identity") c(0, 360) else mm
                   rast_pal <- colorNumeric(
                         palette = rainbow(10),
                         domain = dom,
@@ -930,7 +1009,6 @@ write_volt_maps = False
                   )
             } else {
                   # other connectivity variable
-                  dom <- c(0, mm[2])
                   rast_pal <- colorNumeric(
                         palette = c("gray90", "darkorchid4"),
                         domain = dom,
@@ -942,8 +1020,10 @@ write_volt_maps = False
             if(input$stat == "ESS"){
                   title <- input$stat
             }else{
-                  title <- paste0(input$time, " ", tolower(sub(" ", "<br/>", input$fia_var)))
-                  if(input$fia_var %in% c("total basal area", "total basal area ALL species")){
+                  pre <- if(input$fia_var == "total basal area ALL species") "" else paste0(input$species, "<br/>")
+                  title <- paste0(pre, input$time, "<br/>", input$summary_stat, "<br/>", tolower(sub(" ", "<br/>", input$fia_var)))
+                  if(input$fia_var %in% c("total basal area", "total basal area ALL species") &&
+                     input$summary_stat == "weighted mean"){
                         title <- paste0(title, "<br/>(m2 BA / plot)")
                   }
                   if(input$stat %in% cs_stat_names){
@@ -953,10 +1033,9 @@ write_volt_maps = False
 
             proxy <- proxy %>%
                   addRasterImage(
-                        display_layer(),
+                        r,
                         colors  = rast_pal,
                         opacity = input$rast_opacity,
-                        # project = FALSE,
                         group = "AIM results"
                   ) %>%
                   addLegend(
@@ -1011,7 +1090,7 @@ write_volt_maps = False
                               data = filter(pd, samp_method_cd == 2),
                               lng = ~x,
                               lat = ~y,
-                              radius = point_radius/2, # meters
+                              radius = point_radius()/2, # meters
                               stroke = FALSE, fillColor = "black",
                               group = "FIA plots"
                         ) %>%
@@ -1019,7 +1098,7 @@ write_volt_maps = False
                               data = filter(pd, samp_method_cd == 1),
                               lng = ~x,
                               lat = ~y,
-                              radius = point_radius, # meters
+                              radius = point_radius(), # meters
                               fillColor = ~plot_pal(display),
                               fillOpacity = 1,
                               stroke = TRUE, color = "black", weight = 1,
@@ -1034,7 +1113,7 @@ write_volt_maps = False
                   proxy <- proxy %>%
                         addControl(
                               circleLegend(
-                                    title  = HTML(paste(input$fia_var, "(FIA plots, baseline)", sep = "<br/>")),
+                                    title  = HTML(paste("FIA plots: historic", input$fia_var, sep = "<br/>")),
                                     labels = legend_labels,
                                     colors = legend_colors,
                                     radii = legend_radii
@@ -1054,7 +1133,7 @@ write_volt_maps = False
                               options = velocityOptions(
                                     colorScale = c("#000000", "#000000"),
                                     lineWidth = 2,
-                                    velocityScale = 25,
+                                    velocityScale = 10^input$vector_scale * 25,
                                     particleMultiplier = 0.005,
                                     displayValues = FALSE,
                                     velocityType = "Current",
@@ -1069,7 +1148,7 @@ write_volt_maps = False
                   mag <- mag / minmax(mag)[2]
                   spokes <- make_spokes(mag, connectivity()[["current_direction"]],
                                         subsample = 11 - input$clim_agg,
-                                        arrow_scale = .1)
+                                        arrow_scale = 10^input$vector_scale * .1)
 
                   line_pal <- colorNumeric(palette = c("gray90", "black"), domain = sqrt(spokes$lines$mag))
                   point_pal <- colorNumeric(palette = c("gray90", "black"), domain = sqrt(spokes$points$mag))
@@ -1080,7 +1159,7 @@ write_volt_maps = False
                         addCircles(
                               data = spokes$points %>% bind_cols(st_coordinates(spokes$points)),
                               lng = ~X, lat = ~Y,
-                              radius = point_radius/2,
+                              radius = point_radius()/2 / 10^input$vector_scale,
                               fillOpacity = 1, stroke = FALSE, fillColor = point_pal(sqrt(spokes$points$mag)),
                               group = "current_field"
                         )
@@ -1144,7 +1223,7 @@ write_volt_maps = False
                             color = "#4c32a8", linewidth = .5, alpha = .5) +
                   geom_point(data = filter(d, samp_method_cd == 2),
                              aes(v1, v2, fill = value),
-                             color = "gray60", size = 1.5) +
+                             color = "gray70", size = 1.5) +
                   geom_point(data = filter(d, samp_method_cd == 1),
                              aes(v1, v2, fill = value),
                              shape = 21, color = "black", size = 3) +
@@ -1154,7 +1233,6 @@ write_volt_maps = False
                            color = "#4c32a8", size = 4, alpha = .5) +
                   scale_fill_gradientn(colors = c("gray90", green), limits = dom) +
                   scale_linetype(guide = "none") +
-                  theme_bw() +
                   theme(legend.position = "none") +
                   labs(y = v1,
                        x = v2)
@@ -1185,65 +1263,112 @@ write_volt_maps = False
 
             dom <- if(var() %in% c("batot", "baplot")) c(0, max(d$value, na.rm = TRUE)) else 0:1
 
+            ymax <- if(input$filter_clim) input$theta_clim * 3.3 else NA
             ggplot(d, aes(geog_dist, clim_dist, fill = value)) +
                   geom_vline(xintercept = input$theta_geog, linetype = "longdash", color = "#4c32a8", alpha = .5) +
                   geom_vline(xintercept = input$theta_geog * 3, color = "#4c32a8", alpha = .5) +
                   geom_hline(yintercept = input$theta_clim, linetype = "longdash", color = "#4c32a8", alpha = .5) +
                   geom_hline(yintercept = input$theta_clim * 3, color = "#4c32a8", alpha = .5) +
                   scale_x_continuous(expand = c(0, 0), limits = c(0, input$theta_geog * 3.3)) +
-                  scale_y_continuous(expand = c(0, 0), limits = c(0, input$theta_clim * 3.3)) +
+                  scale_y_continuous(expand = c(0, 0), limits = c(0, ymax)) +
 
-                  geom_point(data = filter(d, samp_method_cd == 2), color = "gray60", size = 1.5) +
+                  geom_point(data = filter(d, samp_method_cd == 2), color = "gray70", size = 1.5) +
                   geom_point(data = filter(d, samp_method_cd == 1), shape = 21, color = "black", size = 3) +
 
                   annotate(geom = "point", x = 0, y = 0, color = "#4c32a8", size = 5, alpha = .5) +
 
                   scale_fill_gradientn(colors = c("gray90", green), limits = dom) +
-                  theme_bw() +
                   theme(legend.position = "none") +
                   labs(y = "Climate difference from focal site (z-score)",
-                       x = "Geographic distane to focal site (km)")
+                       x = "Geographic distance to focal site (km)")
       })
 
       ### forest composition --------------------------------
       output$comp_plot <- renderPlot({
-            d <- switch(input$analog_direction,
-                        "Reverse analogs" = site_analogs()$rev_analogs,
-                        "Forward analogs" = site_analogs()$fwd_analogs,
-                        "Contemporary analogs" = site_analogs()$bsl_analogs)
+
+            d <- bind_rows(site_analogs()$rev_analogs %>% mutate(type = "reverse"),
+                           site_analogs()$fwd_analogs %>% mutate(type = "forward"),
+                           site_analogs()$bsl_analogs %>% mutate(type = "contemporary")) %>%
+                  filter(clim_dist <= input$theta_clim * 3) # ensure only analogs are considered even if input$filter_clim = FALSE
 
             analogs <- plot_occ()[d$analog_index, ] %>%
                   select(x, y) %>%
-                  bind_cols(select(d, clim_dist, geog_dist)) %>%
+                  bind_cols(select(d, clim_dist, geog_dist, type)) %>%
                   mutate(weight = dnorm(clim_dist, sd = input$theta_clim) * dnorm(geog_dist, sd = input$theta_geog)) %>%
-                  left_join(fia_plots_species_all(), by = join_by(x, y))
+                  left_join(fia_plots_species_all(), by = join_by(x, y), relationship = "many-to-many")
+
+            stat <- switch(input$summary_stat,
+                           "weighted mean" = weighted.mean,
+                           "weighted sum" = function(x, w) sum(x * w, na.rm = T))
 
             a <- analogs %>%
-                  select(x, y, weight, species) %>%
-                  tidyr::expand(tidyr::nesting(x, y, weight), species) %>%
-                  left_join(analogs) %>%
+                  select(x, y, weight, species, type) %>%
+                  tidyr::expand(tidyr::nesting(x, y, weight, type), species) %>%
+                  left_join(analogs, by = join_by(x, y, weight, species, type)) %>%
                   mutate(basal_area = ifelse(is.na(basal_area), 0, basal_area)) %>%
-                  group_by(x, y) %>%
+                  group_by(x, y, type) %>%
                   mutate(baplot = sum(basal_area),
                          baprop = basal_area / sum(basal_area),
                          baprop = ifelse(is.finite(baprop), baprop, 0)) %>%
-                  group_by(species) %>%
+                  group_by(species, type) %>%
                   summarize(
-                        pres = weighted.mean(basal_area > 0, weight),
-                        batot = weighted.mean(basal_area, weight),
-                        baprop = weighted.mean(baprop, weight),
-                        baplot = weighted.mean(baplot, weight)
+                        pres = stat(basal_area > 0, weight),
+                        batot = stat(basal_area, weight),
+                        baprop = stat(baprop, weight),
+                        baplot = stat(baplot, weight),
+                        .groups = "drop"
                   ) %>%
                   filter(!is.na(species))
-
             a$value <- a[[var()]]
+            lab <- gsub(" ", "\n", paste(input$summary_stat, input$fia_var))
+            ggplot(a %>% arrange(desc(value)),
+                   aes(type, species, size = value, fill = value)) +
+                  geom_point(color = "black", shape = 21) +
+                  scale_fill_gradientn(colors = c("gray90", green), guide = "legend") +
+                  scale_size_area(max_size = 20) +
+                  labs(x = "analog type",
+                       fill = lab,
+                       size = lab)
 
-            ggplot(a, aes(value, species)) +
-                  geom_bar(stat = "identity", fill = green) +
-                  scale_x_continuous(limits = c(0, max(a$value) * 1.1), expand = c(0, 0)) +
-                  theme_bw() +
-                  labs(y = NULL,
-                       x = paste(input$fia_var, "(kernel-weighted mean across analogs)"))
+
+            # #############
+            #
+            # d <- switch(input$analog_direction,
+            #             "Reverse analogs" = site_analogs()$rev_analogs,
+            #             "Forward analogs" = site_analogs()$fwd_analogs,
+            #             "Contemporary analogs" = site_analogs()$bsl_analogs)
+            #
+            # analogs <- plot_occ()[d$analog_index, ] %>%
+            #       select(x, y) %>%
+            #       bind_cols(select(d, clim_dist, geog_dist)) %>%
+            #       mutate(weight = dnorm(clim_dist, sd = input$theta_clim) * dnorm(geog_dist, sd = input$theta_geog)) %>%
+            #       left_join(fia_plots_species_all(), by = join_by(x, y))
+            #
+            # a <- analogs %>%
+            #       select(x, y, weight, species) %>%
+            #       tidyr::expand(tidyr::nesting(x, y, weight), species) %>%
+            #       left_join(analogs, by = join_by(x, y, weight, species)) %>%
+            #       mutate(basal_area = ifelse(is.na(basal_area), 0, basal_area)) %>%
+            #       group_by(x, y) %>%
+            #       mutate(baplot = sum(basal_area),
+            #              baprop = basal_area / sum(basal_area),
+            #              baprop = ifelse(is.finite(baprop), baprop, 0)) %>%
+            #       group_by(species) %>%
+            #       summarize(
+            #             pres = weighted.mean(basal_area > 0, weight),
+            #             batot = weighted.mean(basal_area, weight),
+            #             baprop = weighted.mean(baprop, weight),
+            #             baplot = weighted.mean(baplot, weight)
+            #       ) %>%
+            #       filter(!is.na(species))
+            #
+            # a$value <- a[[var()]]
+            #
+            # ggplot(a, aes(value, species)) +
+            #       geom_bar(stat = "identity", fill = green) +
+            #       scale_x_continuous(limits = c(0, max(a$value) * 1.1), expand = c(0, 0)) +
+            #       labs(y = NULL,
+            #            x = paste(input$fia_var, "(kernel-weighted mean across analogs)"))
       })
 
 
@@ -1390,7 +1515,6 @@ write_volt_maps = False
                   scale_y_log10(breaks = unique(e$theta_clim)) +
                   scale_fill_viridis_c() +
                   guides(fill = guide_colorbar(barwidth = 12)) +
-                  theme_bw() +
                   theme(legend.position = "bottom") +
                   labs(y = "climate bandwidth (z)",
                        x = "geographic bandwidth (km)",
