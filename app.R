@@ -259,7 +259,7 @@ ui <- page_sidebar(
 
       tags$head(
             tags$style(HTML(
-                        "/* Make the tooltip wider */
+                  "/* Make the tooltip wider */
                     .tooltip-inner {
                         max-width: 350px !important;
                         text-align: left;
@@ -365,14 +365,15 @@ ui <- page_sidebar(
                                     c("presence probability", "proportion basal area", "total basal area", "total basal area ALL species")) %>%
                               tooltip("Choose which focal variable gets interpolated and predicted."),
                         selectInput("summary_stat", "Summary statistic", c("weighted mean", "weighted sum")) %>%
-                              tooltip(HTML("Statistic used to summarize values across analog FIA plots. Weights are based on the combination of climatic similarity
-                                      and geographic proximity.
-                                      <ul>
-                                          <li> `Weighted mean` is a weighted average of values across analogs,
-                                                and could be high even if analogs are few and distant.</li>
-                                          <li> `Weighted sum` is the summation of weights time values, and
-                                                increases with plots' proximity and similarity as well as their mean values.</li>
-                                      </ul>")),
+                              tooltip(HTML("How to summarize the focal variable across analog FIA plots.<br><br>
+                                        <dl style='margin:0;'>
+                                            <dt>Weighted mean</dt>
+                                            <dd>Expected conditions given climate and location. Can be high even when analogs are few and distant.</dd>
+                                            <dt>Weighted sum</dt>
+                                            <dd>Propagule pressure potential: suitability weighted by accessibility to currently-occupied analog plots.
+                                                Deltas reflect how climate change reshuffles analog relationships — positive values indicate
+                                                increasing connectivity to current source populations.</dd>
+                                        </dl>")),
                         selectInput("stat", "Raster variable", c("FIA variable", "effective sample size" = "ESS", cs_stat_names)) %>%
                               tooltip(HTML("<dl style='margin:0;'>
                                               <dt>FIA variable</dt> <dd>Interpolated values for the plot variable selected above</dd>
